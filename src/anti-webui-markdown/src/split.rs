@@ -161,7 +161,7 @@ impl Places {
         let a = *self.anchors.blocks.borrow().get(i)?;
         let r = *self.anchors.boxes.borrow().get(&a.key)?;
         let top = r.offset_in(self.preview)?.y;
-        let height = untrack(window_scale).to_logical(r.rect()?.height as f32);
+        let height = r.layout_rect()?.height;
         let start = if scroll && i == 0 && a.lines.0 == 0 {
             0.0
         } else {
@@ -275,6 +275,16 @@ impl IntoView for MarkdownSplitEditor {
             let (places, leader) = (places.clone(), leader.clone());
             Rc::new(move || {
                 if leader.get() != Side::Source {
+                    return;
+                }
+                // The ends of the source and of what it shows are not the same height, so the top
+                // line alone leaves the right side short of its own end.
+                if editor.at_end() {
+                    preview.scroll_to(0.0, places.height.get());
+                    return;
+                }
+                if editor.at_start() {
+                    preview.scroll_to(0.0, 0.0);
                     return;
                 }
                 if let Some(y) = editor.top_line().and_then(|l| places.height_of(l, true)) {

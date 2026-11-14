@@ -126,6 +126,25 @@ impl NodeRef {
         })?
     }
 
+    /// The border box in the layout's own pixels, in logical pixels, as of the last layout: the
+    /// space [`offset_in`](Self::offset_in) measures in, without the transforms around it. Unlike
+    /// [`rect`](Self::rect) and [`logical_rect`](Self::logical_rect), a scale around the node
+    /// doesn't change it.
+    pub fn layout_rect(&self) -> Option<RectF> {
+        self.in_window(|id| {
+            with_doc(|d| {
+                let n = d.get(id)?;
+                let l = |v: i32| d.scale.to_logical(v as f32);
+                Some(RectF::new(
+                    l(n.abs.x),
+                    l(n.abs.y),
+                    l(n.abs.width),
+                    l(n.abs.height),
+                ))
+            })
+        })?
+    }
+
     /// Where the node's border box is in what an ancestor scrolls (from the ancestor's border box,
     /// as if it hadn't scrolled), in logical pixels, as of the last layout. Unlike
     /// [`rect`](Self::rect), it doesn't change when the ancestor scrolls.
@@ -2217,6 +2236,37 @@ impl EditorRef {
         if let Some(id) = self.0.get_untracked() {
             with_doc(|d| crate::text::editor::scroll_to_line(d, id, line));
         }
+    }
+
+    /// Whether the editor is scrolled as far as it goes towards the start, and can scroll at all.
+    pub fn at_start(&self) -> bool {
+        self.at_edge(false)
+    }
+
+    /// Whether the editor is scrolled as far as it goes towards the end, and can scroll at all.
+    pub fn at_end(&self) -> bool {
+        self.at_edge(true)
+    }
+
+    fn at_edge(&self, end: bool) -> bool {
+        let Some(id) = self.0.get_untracked() else {
+            return false;
+        };
+        with_doc(|d| {
+            let Some(n) = d.get(id) else {
+                return false;
+            };
+            let pad = n.padding_abs();
+            let max = (n.content_size.height - pad.height).max(0);
+            if max == 0 {
+                return false;
+            }
+            if end {
+                n.scroll.y >= max
+            } else {
+                n.scroll.y <= 0
+            }
+        })
     }
 
     /// The text, without tracking it.

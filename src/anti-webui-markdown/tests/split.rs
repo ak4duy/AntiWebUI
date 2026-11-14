@@ -175,6 +175,46 @@ fn the_right_side_follows_the_source_and_back() {
     assert!(top < 499.0, "the source followed, to line {top}");
 }
 
+#[test]
+fn the_right_side_follows_the_source_the_same_under_a_scale() {
+    let at = |zoom: f32| {
+        let editor = editor_ref();
+        let mut ui = mount(move || {
+            let s = signal(long_doc(200));
+            div()
+                .w(1000.0)
+                .h(600.0)
+                .scale(zoom)
+                .transform_origin(0.0, 0.0)
+                .child(
+                    markdown_split_editor(s)
+                        .editor_ref(editor)
+                        .w(1000.0)
+                        .h(600.0),
+                )
+        });
+        for _ in 0..3 {
+            ui.update();
+        }
+        editor.scroll_to_line(500.5);
+        for _ in 0..3 {
+            ui.update();
+        }
+        with_doc(|d| {
+            d.nodes
+                .iter()
+                .filter(|(_, n)| {
+                    n.computed.overflow_y == anti_webui_core::style::Overflow::Scroll
+                        && !matches!(n.kind, NodeKind::Editor(_))
+                })
+                .map(|(_, n)| n.scroll.y)
+                .max()
+                .unwrap_or(0)
+        })
+    };
+    assert_eq!(at(1.0), at(1.5), "the scale changed where it followed");
+}
+
 /// How long a keystroke takes, the source and the right side together:
 /// `MARKDOWN_FILE=... cargo test --release -p anti-webui-markdown --test split time_typing --
 /// --ignored --nocapture`. A 1600 × 900 window at scale 1.8, typing in a paragraph in the middle.
