@@ -397,10 +397,11 @@ impl Ui {
                     changed = true;
                 }
                 if doc.dirty.position {
+                    // A layout pass skips subtrees whose boxes didn't move, so what scrolled in
+                    // the same update still has to put its children in place.
                     position_document(doc);
                     doc.visibility.check = true;
                     doc.dirty.position = false;
-                    doc.reposition.clear();
                     doc.dirty.carets = true;
                     doc.dirty.paint = true;
                     changed = true;
