@@ -2662,6 +2662,19 @@ fn scroll_into_view(doc: &mut Document, id: NodeId) {
     }
 }
 
+/// `rect`, in window coordinates, in the coordinates of `n`: the ones its layout and scrolling
+/// are in, which a transform around it may have scaled.
+fn from_window_rect(doc: &Document, n: &Node, rect: RectI) -> Option<RectI> {
+    let tl = doc.from_window(n, PointF::new(rect.x as f32, rect.y as f32))?;
+    let br = doc.from_window(n, PointF::new(rect.right() as f32, rect.bottom() as f32))?;
+    Some(RectI::new(
+        tl.x.round() as i32,
+        tl.y.round() as i32,
+        (br.x - tl.x).round() as i32,
+        (br.y - tl.y).round() as i32,
+    ))
+}
+
 /// Scrolls what `id` is in so that `rect`, in window coordinates, shows.
 fn scroll_rect_into_view(doc: &mut Document, id: NodeId, mut rect: RectI) {
     let ancestors = doc.ancestors(id);
@@ -2672,7 +2685,10 @@ fn scroll_rect_into_view(doc: &mut Document, id: NodeId, mut rect: RectI) {
         if n.is_popup() {
             return;
         }
-        let pad = doc.rect_to_window(n, n.padding_abs());
+        let Some(local) = from_window_rect(doc, n, rect) else {
+            continue;
+        };
+        let pad = n.padding_abs();
         let (c, content) = (&n.computed, n.content_size);
         let wanted = |lo: i32, hi: i32, view_lo: i32, view_hi: i32| {
             if lo < view_lo {
@@ -2685,15 +2701,16 @@ fn scroll_rect_into_view(doc: &mut Document, id: NodeId, mut rect: RectI) {
         };
         let mut scroll = n.scroll;
         if c.overflow_y == Overflow::Scroll {
-            let d = wanted(rect.y, rect.bottom(), pad.y, pad.bottom());
+            let d = wanted(local.y, local.bottom(), pad.y, pad.bottom());
             scroll.y = (scroll.y + d).clamp(0, (content.height - pad.height).max(0));
         }
         if c.overflow_x == Overflow::Scroll {
-            let d = wanted(rect.x, rect.right(), pad.x, pad.right());
+            let d = wanted(local.x, local.right(), pad.x, pad.right());
             scroll.x = (scroll.x + d).clamp(0, (content.width - pad.width).max(0));
         }
         if scroll != n.scroll {
-            rect = rect.translate(n.scroll.x - scroll.x, n.scroll.y - scroll.y);
+            let moved = local.translate(n.scroll.x - scroll.x, n.scroll.y - scroll.y);
+            rect = doc.rect_to_window(n, moved);
             doc.nodes[a].scroll = scroll;
             doc.mark_scrolled(a);
         }

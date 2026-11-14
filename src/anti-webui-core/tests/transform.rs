@@ -736,3 +736,45 @@ fn a_layer_is_no_bigger_than_what_can_be_seen_of_what_it_draws() {
         RectI::new(0, 0, 100, 40)
     );
 }
+
+#[test]
+fn revealing_reaches_the_end_inside_a_scaled_ancestor() {
+    for zoom in [0.75, 1.5] {
+        let first = node_ref();
+        let last = node_ref();
+        let scroller = node_ref();
+        let mut ui = Ui::new(move || {
+            div().size_full().child(
+                div()
+                    .w(100.0)
+                    .h(100.0)
+                    .scale(zoom)
+                    .transform_origin(0.0, 0.0)
+                    .child(
+                        div()
+                            .w(100.0)
+                            .h(100.0)
+                            .overflow_y_scroll()
+                            .node_ref(scroller)
+                            .children((0..10).map(move |i| {
+                                let row = div().h(30.0);
+                                match i {
+                                    0 => row.node_ref(first),
+                                    9 => row.node_ref(last),
+                                    _ => row,
+                                }
+                            })),
+                    ),
+            )
+        });
+        window(&mut ui, 300, 300);
+        let scroll = || with_doc(|d| d.get(scroller.get().unwrap()).unwrap().scroll.y);
+        // 10 rows of 30 in a view of 100: it can scroll by 200.
+        last.scroll_into_view();
+        ui.update();
+        assert_eq!(scroll(), 200, "to the end at {zoom}");
+        first.scroll_into_view();
+        ui.update();
+        assert_eq!(scroll(), 0, "back to the start at {zoom}");
+    }
+}
