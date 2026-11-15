@@ -2166,6 +2166,38 @@ impl EditorRef {
         self.change(|e| e.replace(range, text));
     }
 
+    /// Undoes one step of the text's history, as Ctrl+Z does. Whether the text changed.
+    pub fn undo(&self) -> bool {
+        self.step(true)
+    }
+
+    /// Redoes one step of the text's history, as Ctrl+Shift+Z does. Whether the text changed.
+    pub fn redo(&self) -> bool {
+        self.step(false)
+    }
+
+    fn step(&self, back: bool) -> bool {
+        let changed = Cell::new(false);
+        self.change(|e| {
+            let out = if back { e.undo() } else { e.redo() };
+            changed.set(out.changed);
+            out
+        });
+        changed.get()
+    }
+
+    /// Forgets what can be undone and redone, so that undo does not cross into what came before.
+    pub fn clear_history(&self) {
+        let Some(id) = self.0.get_untracked() else {
+            return;
+        };
+        with_doc(|d| {
+            if let Some(e) = d.get_mut(id).and_then(Node::editor_mut) {
+                e.clear_history();
+            }
+        });
+    }
+
     /// Replaces a range of bytes of the text, as one step of undo, and then selects from one byte
     /// to another in the new text: the same as `replace` and `select`, in one go.
     pub fn replace_and_select(
