@@ -2270,6 +2270,18 @@ impl EditorRef {
         }
     }
 
+    /// Scrolls the editor's box to `y` physical pixels from the top, after the next layout, so
+    /// that a caret brought into view by that layout doesn't move it.
+    pub fn scroll_to_after_layout(&self, y: i32) {
+        let Some(id) = self.0.get_untracked() else {
+            return;
+        };
+        with_doc(|d| {
+            d.pending_scroll_to.push((id, PointI::new(0, y)));
+            d.dirty.paint = true;
+        });
+    }
+
     /// Whether the editor is scrolled as far as it goes towards the start, and can scroll at all.
     pub fn at_start(&self) -> bool {
         self.at_edge(false)

@@ -363,3 +363,20 @@ fn the_line_at_the_top_stays_when_the_estimates_change() {
         "the top went from line {before} to {after}"
     );
 }
+
+/// A scroll asked for after layout wins over the caret being brought into view in the same frame.
+#[test]
+fn scrolling_after_layout_wins_over_the_caret_coming_into_view() {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let scroller = node_ref();
+    let r = editor_ref();
+    let mut ui = mount(move || editor(text, scroller).editor_ref(r));
+    let end = r.text().len();
+    r.select(end, end);
+    r.scroll_to_after_layout(0);
+    for _ in 0..3 {
+        ui.update();
+    }
+    let top = r.top_line().unwrap();
+    assert!(top < 1.0, "the view stayed at the top, at line {top}");
+}
