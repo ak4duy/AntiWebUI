@@ -6,6 +6,9 @@
 use crate::theme::{Theme, focus_ring, smooth, themed};
 use anti_webui_core::prelude::*;
 use std::rc::Rc;
+use std::time::Duration;
+
+const TYPED_FOR: Duration = Duration::from_millis(1000);
 
 fn select_sheet(t: &Theme) -> Sheet {
     Sheet::new(|s| {
@@ -94,6 +97,9 @@ impl<T: Clone + PartialEq + 'static> Options<T> {
 pub struct SelectState<T: 'static> {
     value: Binding<T>,
     options: Options<T>,
+    labels: Signal<Rc<Vec<String>>>,
+    typed: Signal<String>,
+    timer: Signal<Option<Timeout>>,
     open: Signal<bool>,
     lit: Signal<usize>,
 }
@@ -164,6 +170,35 @@ impl<T: Clone + PartialEq + 'static> SelectState<T> {
     fn key(&self, e: &KeyboardEvent) {
         let last = self.options.count().saturating_sub(1);
         let is_open = self.open.get_untracked();
+        let m = e.modifiers;
+        let typing = !m.ctrl && !m.alt && !m.logo;
+        let ch = match &e.key {
+            Key::Character(s) if typing => {
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) if !c.is_control() => Some(c),
+                    _ => None,
+                }
+            }
+            Key::Named(NamedKey::Space) if typing => Some(' '),
+            _ => None,
+        };
+        if let Some(c) = ch {
+            if c == ' ' && self.typed.with_untracked(|t| t.is_empty()) {
+                e.prevent_default();
+                if is_open {
+                    self.choose(self.lit.get_untracked());
+                } else {
+                    self.show_list();
+                }
+                return;
+            }
+            if !self.labels.with_untracked(|l| l.is_empty()) {
+                e.prevent_default();
+                self.type_ahead(c);
+                return;
+            }
+        }
         let moved = match &e.key {
             Key::Named(NamedKey::Enter | NamedKey::Space) => {
                 e.prevent_default();
@@ -195,18 +230,77 @@ impl<T: Clone + PartialEq + 'static> SelectState<T> {
             self.options.reveal(moved);
         }
     }
+
+    fn type_ahead(&self, c: char) {
+        if let Some(running) = self.timer.get_untracked() {
+            running.cancel();
+        }
+        let mut typed = self.typed.get_untracked();
+        typed.extend(c.to_lowercase());
+        self.typed.set(typed.clone());
+        let signal = self.typed;
+        let timer = self.timer;
+        let wait = set_timeout(TYPED_FOR, move || {
+            if signal.is_alive() {
+                signal.set(String::new());
+            }
+            if timer.is_alive() {
+                timer.set(None);
+            }
+        });
+        self.timer.set(Some(wait));
+
+        let count = self.options.count();
+        if count == 0 {
+            return;
+        }
+        let first = typed.chars().next().unwrap();
+        let repeated = typed.chars().all(|x| x == first);
+        let current = if self.open.get_untracked() {
+            Some(self.lit.get_untracked())
+        } else {
+            self.options.position(&self.value.get_untracked())
+        };
+        let start = match current {
+            Some(i) if repeated => (i + 1) % count,
+            Some(i) => i,
+            None => 0,
+        };
+        let prefix = if repeated {
+            first.to_string()
+        } else {
+            typed.clone()
+        };
+        let found = (0..count).map(|k| (start + k) % count).find(|&i| {
+            self.labels.with_untracked(|l| {
+                l.get(i)
+                    .is_some_and(|name| name.to_lowercase().starts_with(&prefix))
+            })
+        });
+        let Some(i) = found else {
+            return;
+        };
+        self.lit.set(i);
+        if self.open.get_untracked() {
+            self.options.reveal(i);
+        } else {
+            self.open.set(true);
+        }
+    }
 }
 
 type ListOf<T> = Rc<dyn Fn(SelectState<T>) -> Div>;
 
-/// A pull-down list bound to `value`. Opens where it is pressed, like a browser's `<select>`.
+/// A pull-down list bound to `value`. Opens where it is pressed, like a browser's `<select>`, and
+/// typing the start of a name jumps to it.
 pub fn select<T: Clone + PartialEq + 'static>(
     value: impl Into<Binding<T>>,
     options: Vec<(T, String)>,
 ) -> Div {
     let (values, names): (Vec<T>, Vec<String>) = options.into_iter().unzip();
     let names = Rc::new(names);
-    select_with(value, values, move |s| {
+    let labels = names.clone();
+    select_with_labels(value, values, labels, move |s| {
         let label_names = names.clone();
         let field = div()
             .flex()
@@ -261,7 +355,8 @@ pub fn select<T: Clone + PartialEq + 'static>(
 /// box that shows the value, which gets the focus, the keys and the pointer, and what builds the
 /// list each time it opens, with each option made with [`SelectState::option`]. The list hangs
 /// under the box, as wide as it. The keys go as in a browser's `<select>`: Down or Enter opens it,
-/// Up and Down go through it, Enter chooses.
+/// Up and Down go through it, Enter chooses. Typing jumps to a name only in [`select`], which knows
+/// the names.
 pub fn select_with<T, F>(
     value: impl Into<Binding<T>>,
     values: Vec<T>,
@@ -271,9 +366,25 @@ where
     T: Clone + PartialEq + 'static,
     F: Fn() -> Div + 'static,
 {
+    select_with_labels(value, values, Rc::new(Vec::new()), setup)
+}
+
+fn select_with_labels<T, F>(
+    value: impl Into<Binding<T>>,
+    values: Vec<T>,
+    labels: Rc<Vec<String>>,
+    setup: impl FnOnce(SelectState<T>) -> (Div, F),
+) -> Div
+where
+    T: Clone + PartialEq + 'static,
+    F: Fn() -> Div + 'static,
+{
     let state = SelectState {
         value: value.into(),
         options: Options::new(values),
+        labels: signal(labels),
+        typed: signal(String::new()),
+        timer: signal(None),
         open: signal(false),
         lit: signal(0),
     };
