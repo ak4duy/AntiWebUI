@@ -1094,6 +1094,7 @@ pub struct MarkdownEditor {
     theme: MarkdownTheme,
     on_link: OnLink,
     on_key_down: Option<Rc<dyn Fn(&KeyboardEvent)>>,
+    list_keys: bool,
     image: Pictures,
     highlight: Option<Rc<Highlight>>,
     #[cfg(feature = "code")]
@@ -1107,6 +1108,7 @@ pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
         theme: MarkdownTheme::default(),
         on_link: None,
         on_key_down: None,
+        list_keys: true,
         image: None,
         highlight: None,
         #[cfg(feature = "code")]
@@ -1130,6 +1132,13 @@ impl MarkdownEditor {
     /// Called before the Markdown editor handles a key. Preventing default skips its built-in handling.
     pub fn on_key_down(mut self, f: impl Fn(&KeyboardEvent) + 'static) -> Self {
         self.on_key_down = Some(Rc::new(f));
+        self
+    }
+
+    /// Whether Enter and Tab go on with lists and quotes. On by default; turn it off to handle
+    /// them in `on_key_down` instead.
+    pub fn list_keys(mut self, on: bool) -> Self {
+        self.list_keys = on;
         self
     }
 
@@ -1282,6 +1291,7 @@ impl IntoView for MarkdownEditor {
         let editor = editor_ref();
         let on_link = self.on_link.clone();
         let on_key_down = self.on_key_down;
+        let lists = self.list_keys;
         #[cfg(feature = "code")]
         let (highlight, ready) = crate::view::code_colors(self.highlight, self.code_theme);
         #[cfg(not(feature = "code"))]
@@ -1317,7 +1327,9 @@ impl IntoView for MarkdownEditor {
                         return;
                     }
                 }
-                list_keys(editor, e);
+                if lists {
+                    list_keys(editor, e);
+                }
             });
         if let Some(open) = on_link {
             e = e.on_click(move |p| {

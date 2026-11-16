@@ -21,6 +21,7 @@ pub struct MarkdownSplitEditor {
     code_theme: CodeTheme,
     on_link: OnLink,
     on_key_down: Option<Rc<dyn Fn(&KeyboardEvent)>>,
+    list_keys: bool,
     image: Pictures,
     emoji: Emojis,
     editor_ref: Option<EditorRef>,
@@ -37,6 +38,7 @@ pub fn markdown_split_editor(source: Signal<String>) -> MarkdownSplitEditor {
         code_theme: CodeTheme::light(),
         on_link: None,
         on_key_down: None,
+        list_keys: true,
         image: None,
         emoji: None,
         editor_ref: None,
@@ -68,6 +70,13 @@ impl MarkdownSplitEditor {
     /// Called before the split editor handles a key. Preventing default skips its built-in handling.
     pub fn on_key_down(mut self, f: impl Fn(&KeyboardEvent) + 'static) -> Self {
         self.on_key_down = Some(Rc::new(f));
+        self
+    }
+
+    /// Whether Enter and Tab go on with lists and quotes. On by default; turn it off to handle
+    /// them in `on_key_down` instead.
+    pub fn list_keys(mut self, on: bool) -> Self {
+        self.list_keys = on;
         self
     }
 
@@ -256,6 +265,7 @@ impl IntoView for MarkdownSplitEditor {
     fn into_view(self) -> View {
         let source = self.source;
         let on_key_down = self.on_key_down;
+        let lists = self.list_keys;
         let editor = self.editor_ref.unwrap_or_else(editor_ref);
         let preview = node_ref();
         let page = node_ref();
@@ -360,7 +370,9 @@ impl IntoView for MarkdownSplitEditor {
                                 }
                             }
                             l3();
-                            list_keys(editor, e);
+                            if lists {
+                                list_keys(editor, e);
+                            }
                         })
                         .flex_1()
                         .min_h(0.0),
