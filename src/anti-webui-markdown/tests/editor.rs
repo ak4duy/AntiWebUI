@@ -155,6 +155,26 @@ fn marks_hide_away_from_the_caret_and_blocks_show_as_they_look() {
 }
 
 #[test]
+fn rows_know_where_their_lines_start() {
+    let source = signal("Some **bold**\n\nlast\n".to_owned());
+    let _ui = mount(move || editor(source));
+    let h = host();
+    let starts: Vec<usize> = with_doc(|d| {
+        d.nodes[h]
+            .children
+            .iter()
+            .filter_map(
+                |&div| match &d.nodes[*d.nodes[div].children.first()?].kind {
+                    NodeKind::Text(t) => t.row.as_ref().map(|r| r.start),
+                    _ => None,
+                },
+            )
+            .collect()
+    });
+    assert_eq!(starts, [0, 14, 15, 20]);
+}
+
+#[test]
 fn enter_goes_on_with_a_list_and_ends_it_on_an_empty_item() {
     let source = signal("- one".to_owned());
     let mut ui = mount(move || editor(source));
