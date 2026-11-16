@@ -736,3 +736,104 @@ fn a_layer_is_no_bigger_than_what_can_be_seen_of_what_it_draws() {
         RectI::new(0, 0, 100, 40)
     );
 }
+
+#[test]
+fn revealing_reaches_the_end_inside_a_scaled_ancestor() {
+    for zoom in [0.75, 1.5] {
+        let first = node_ref();
+        let last = node_ref();
+        let scroller = node_ref();
+        let mut ui = Ui::new(move || {
+            div().size_full().child(
+                div()
+                    .w(100.0)
+                    .h(100.0)
+                    .scale(zoom)
+                    .transform_origin(0.0, 0.0)
+                    .child(
+                        div()
+                            .w(100.0)
+                            .h(100.0)
+                            .overflow_y_scroll()
+                            .node_ref(scroller)
+                            .children((0..10).map(move |i| {
+                                let row = div().h(30.0);
+                                match i {
+                                    0 => row.node_ref(first),
+                                    9 => row.node_ref(last),
+                                    _ => row,
+                                }
+                            })),
+                    ),
+            )
+        });
+        window(&mut ui, 300, 300);
+        let scroll = || with_doc(|d| d.get(scroller.get().unwrap()).unwrap().scroll.y);
+        // 10 rows of 30 in a view of 100: it can scroll by 200.
+        last.scroll_into_view();
+        ui.update();
+        assert_eq!(scroll(), 200, "to the end at {zoom}");
+        first.scroll_into_view();
+        ui.update();
+        assert_eq!(scroll(), 0, "back to the start at {zoom}");
+    }
+}
+
+#[test]
+fn revealing_moves_the_content_when_a_layout_change_follows_in_the_same_update() {
+    let first = node_ref();
+    let last = node_ref();
+    let scroller = node_ref();
+    let other = node_ref();
+    let mut ui = Ui::new(move || {
+        div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .w(100.0)
+                    .h(100.0)
+                    .scale(1.5)
+                    .transform_origin(0.0, 0.0)
+                    .child(
+                        div()
+                            .w(100.0)
+                            .h(100.0)
+                            .overflow_y_scroll()
+                            .node_ref(scroller)
+                            .children((0..10).map(move |i| {
+                                let row = div().h(30.0).flex_none();
+                                match i {
+                                    0 => row.node_ref(first),
+                                    9 => row.node_ref(last),
+                                    _ => row,
+                                }
+                            })),
+                    ),
+            )
+            .child(
+                div().w(100.0).h(100.0).overflow_y_scroll().children(
+                    (0..10).map(move |i| {
+                        let row = div().h(30.0).flex_none();
+                        match i {
+                            9 => row.content_visibility_auto().node_ref(other),
+                            _ => row,
+                        }
+                    }),
+                ),
+            )
+    });
+    window(&mut ui, 300, 300);
+    // Both scroll in this update; the second one's contents come near the screen, which lays
+    // them out again after the first one scrolled.
+    last.scroll_into_view();
+    other.scroll_into_view();
+    ui.update();
+    let view = scroller.rect().unwrap();
+    let row = last.rect().unwrap();
+    assert!(
+        row.y >= view.y && row.bottom() <= view.bottom(),
+        "the revealed row is where the scroll puts it: row {row:?} view {view:?}"
+    );
+}

@@ -129,6 +129,23 @@ fn typing_goes_into_the_text_and_each_line_is_a_row() {
 }
 
 #[test]
+fn the_editor_ref_undoes_redoes_and_forgets_history() {
+    let source = signal(String::new());
+    let r = editor_ref();
+    let mut ui = mount(move || editor(source).editor_ref(r));
+    click(&mut ui, PointF::new(20.0, 10.0), 0);
+    typ(&mut ui, "abc");
+    assert_eq!(source.get_untracked(), "abc");
+    assert!(r.undo());
+    assert_eq!(source.get_untracked(), "");
+    assert!(r.redo());
+    assert_eq!(source.get_untracked(), "abc");
+    r.clear_history();
+    assert!(!r.undo());
+    assert_eq!(source.get_untracked(), "abc");
+}
+
+#[test]
 fn a_new_text_from_the_signal_shows() {
     let source = signal("one\ntwo".to_owned());
     let mut ui = mount(move || editor(source));

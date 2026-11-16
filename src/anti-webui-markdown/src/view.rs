@@ -65,6 +65,7 @@ pub struct MarkdownView {
     source: Source,
     theme: MarkdownTheme,
     on_link: OnLink,
+    wiki: bool,
     image: Pictures,
     emoji: Emojis,
     highlight: Option<Rc<Highlight>>,
@@ -79,6 +80,7 @@ pub fn markdown_view(source: impl IntoMarkdown) -> MarkdownView {
         source: source.into_markdown().0,
         theme: MarkdownTheme::default(),
         on_link: None,
+        wiki: false,
         image: None,
         emoji: None,
         highlight: None,
@@ -96,9 +98,17 @@ impl MarkdownView {
     }
 
     /// Called with the target of a link that is clicked. Links to headings of the document
-    /// (`#name`) scroll to them instead.
+    /// (`#name`) scroll to them instead. A wiki link is given as `[[target]]`, as it is written
+    /// without its alias.
     pub fn on_link(mut self, f: impl Fn(&str) + 'static) -> Self {
         self.on_link = Some(Rc::new(f));
+        self
+    }
+
+    /// Whether `[[target]]` is a link. Off by default; a clicked one is given to `on_link` as
+    /// `[[target]]`, without its alias.
+    pub fn wiki_links(mut self, on: bool) -> Self {
+        self.wiki = on;
         self
     }
 
@@ -194,6 +204,8 @@ pub(crate) struct Ctx {
     image: Pictures,
     emoji: Emojis,
     highlight: Option<Rc<Highlight>>,
+    /// Whether `[[target]]` is a link.
+    pub(crate) wiki: bool,
     /// The style of each kind of span, shared by all of them.
     spans: RefCell<HashMap<(u8, bool, u32), Rc<Style>>>,
     link_hover: Rc<Style>,
@@ -255,6 +267,7 @@ impl Ctx {
         image: Pictures,
         emoji: Emojis,
         highlight: Option<Rc<Highlight>>,
+        wiki: bool,
     ) -> Rc<Self> {
         Rc::new(Ctx {
             link_hover: Rc::new(theme.link_hover.clone()),
@@ -263,6 +276,7 @@ impl Ctx {
             image,
             emoji,
             highlight,
+            wiki,
             spans: RefCell::default(),
             anchors: RefCell::default(),
             footnotes: RefCell::default(),
@@ -276,7 +290,7 @@ impl Ctx {
     /// The first block of `source`, as the viewer shows it.
     /// A block alone, which starts at `at` in its document.
     pub(crate) fn block_of(self: &Rc<Self>, source: &str, at: usize) -> View {
-        match parse::parse(source).into_iter().next() {
+        match parse::parse(source, self.wiki).into_iter().next() {
             Some(top) => {
                 self.base.set(at);
                 let view = self.block(&top.block, 0.0, 0);
@@ -1042,7 +1056,7 @@ impl Ctx {
 
     /// The blocks at the top of a document, with keys that stay while their source does.
     fn entries(self: &Rc<Self>, source: &str) -> Vec<Rc<Entry>> {
-        let tops = parse::parse(source);
+        let tops = parse::parse(source, self.wiki);
         self.number_footnotes(&tops);
         let numbers = Rc::new(crate::numbers::Numbers::of(
             &self.numbers.borrow(),
@@ -1135,7 +1149,14 @@ impl IntoView for MarkdownView {
         let (highlight, _) = code_colors(self.highlight, self.code_theme);
         #[cfg(not(feature = "code"))]
         let highlight = self.highlight;
-        let ctx = Ctx::new(self.theme, self.on_link, self.image, self.emoji, highlight);
+        let ctx = Ctx::new(
+            self.theme,
+            self.on_link,
+            self.image,
+            self.emoji,
+            highlight,
+            self.wiki,
+        );
         *ctx.split.borrow_mut() = self.anchors.clone();
         let source = self.source;
         let items = {

@@ -6,7 +6,7 @@ use anti_webui_core::event::*;
 use anti_webui_core::geometry::{PointF, Scale, SizeI};
 use anti_webui_core::prelude::*;
 use anti_webui_core::tree::{NodeId, NodeKind, with_doc};
-use anti_webui_markdown::{MarkdownTheme, markdown_editor};
+use anti_webui_markdown::{MarkdownEditor, MarkdownTheme, markdown_editor};
 use std::time::{Duration, Instant};
 
 fn mount<V: IntoView>(f: impl FnOnce() -> V) -> Ui {
@@ -20,7 +20,7 @@ fn mount<V: IntoView>(f: impl FnOnce() -> V) -> Ui {
     ui
 }
 
-fn editor(source: Signal<String>) -> impl IntoView {
+fn editor(source: Signal<String>) -> MarkdownEditor {
     markdown_editor(source)
         .w(900.0)
         .h(800.0)
@@ -85,6 +85,27 @@ fn shown() -> Vec<String> {
     })
 }
 
+/// The marked parts of a row: what it shows, and the color of each.
+fn marked(row: usize) -> Vec<(String, Option<Color>)> {
+    let h = host();
+    with_doc(|d| {
+        let div = d.nodes[h].children[row];
+        let text = d.nodes[div].children[0];
+        let NodeKind::Text(t) = &d.nodes[text].kind else {
+            panic!("row {row} is not text")
+        };
+        t.rich
+            .as_ref()
+            .map(|r| {
+                r.spans
+                    .iter()
+                    .map(|s| (t.text[s.range.clone()].to_owned(), s.style.color))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
 fn select(at: usize) {
     let h = host();
     with_doc(|d| d.pending_focus = Some(Some(h)));
@@ -131,6 +152,26 @@ fn marks_hide_away_from_the_caret_and_blocks_show_as_they_look() {
     assert_eq!(rows[7], "| a | b |");
     assert_eq!(rows[9], "| 1 | 2 |");
     assert_eq!(rows[11], "<block>", "the rule after it");
+}
+
+#[test]
+fn rows_know_where_their_lines_start() {
+    let source = signal("Some **bold**\n\nlast\n".to_owned());
+    let _ui = mount(move || editor(source));
+    let h = host();
+    let starts: Vec<usize> = with_doc(|d| {
+        d.nodes[h]
+            .children
+            .iter()
+            .filter_map(
+                |&div| match &d.nodes[*d.nodes[div].children.first()?].kind {
+                    NodeKind::Text(t) => t.row.as_ref().map(|r| r.start),
+                    _ => None,
+                },
+            )
+            .collect()
+    });
+    assert_eq!(starts, [0, 14, 15, 20]);
 }
 
 #[test]
@@ -372,6 +413,44 @@ fn a_selection_over_a_table_leaves_it_as_it_looks() {
     select(at + 1);
     named(&mut ui, NamedKey::ArrowRight);
     assert_eq!(shown()[4], "| 1 | 2 |");
+}
+
+#[test]
+fn wiki_links_show_as_links() {
+    let doc = "see [[Plan: Phase 5]] now\n\nand [[Plan|the plan]] there\n\n![[pic.png]]";
+    let source = signal(doc.to_owned());
+    let mut ui = mount(move || editor(source).wiki_links(true));
+    let link = MarkdownTheme::default().link.color;
+    assert_eq!(
+        shown(),
+        [
+            "see Plan: Phase 5 now",
+            "",
+            "and the plan there",
+            "",
+            "![[pic.png]]"
+        ]
+    );
+    assert_eq!(
+        marked(0),
+        [("Plan: Phase 5".to_owned(), link)],
+        "the target shows in the link's color, the brackets hidden"
+    );
+    assert_eq!(marked(2), [("the plan".to_owned(), link)]);
+
+    // With the caret in the link, its marks show.
+    let at = doc.find("Phase").unwrap();
+    select(at + 1);
+    ui.update();
+    named(&mut ui, NamedKey::ArrowRight);
+    assert_eq!(shown()[0], "see [[Plan: Phase 5]] now");
+}
+
+#[test]
+fn wiki_links_are_off_by_default() {
+    let source = signal("see [[Plan]] now".to_owned());
+    let _ui = mount(move || editor(source));
+    assert_eq!(shown(), ["see [[Plan]] now"]);
 }
 
 #[test]

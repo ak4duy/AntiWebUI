@@ -269,6 +269,8 @@ pub type ShownPreedit = (Range<usize>, Option<(usize, usize)>);
 /// what of the selection, the pre-edit and the caret is on it.
 pub struct RowLink {
     pub host: NodeId,
+    /// The byte where its line starts in the editor's text.
+    pub start: usize,
     /// The parts that are shown: where each starts in the shown text and in the line, and how long
     /// it is, in order.
     pieces: Vec<(usize, usize, usize)>,
@@ -1384,9 +1386,16 @@ fn gutter_style(g: &Gutter, x: i32, w: i32) -> Style {
         .select_none()
 }
 
-fn link_of(host: NodeId, line: &str, d: &Display, preedit: Option<&Preedit>) -> RowLink {
+fn link_of(
+    host: NodeId,
+    start: usize,
+    line: &str,
+    d: &Display,
+    preedit: Option<&Preedit>,
+) -> RowLink {
     RowLink {
         host,
+        start,
         pieces: d.pieces.clone(),
         len: line.len(),
         shown: d.shown,
@@ -1426,6 +1435,7 @@ struct GutterLook<'a> {
 /// Makes a row's nodes, under the current owner.
 fn build_row(
     host: NodeId,
+    start: usize,
     row: &Row,
     line: &str,
     preedit: Option<(usize, &Preedit)>,
@@ -1449,7 +1459,7 @@ fn build_row(
                     baseline: None,
                 })
                 .collect();
-            let link = link_of(host, line, &d, preedit.map(|p| p.1));
+            let link = link_of(host, start, line, &d, preedit.map(|p| p.1));
             let mut node = text_node(d.text);
             if let NodeKind::Text(t) = &mut node.kind {
                 t.rich = Some(Box::new(RichData {
@@ -1507,6 +1517,7 @@ fn build_row(
 fn refill(
     doc: &mut Document,
     host: NodeId,
+    start: usize,
     slot: &RowSlot,
     look: &Rc<LineLook>,
     line: &str,
@@ -1532,11 +1543,17 @@ fn refill(
     let Some(text) = slot.text else {
         return;
     };
+    if let Some(n) = doc.nodes.get_mut(text)
+        && let NodeKind::Text(t) = &mut n.kind
+        && let Some(l) = &mut t.row
+    {
+        l.start = start;
+    }
     if same_letters {
         return;
     }
     let d = display(line, look, preedit.map(|(p, pe)| (p, pe.text.as_str())));
-    let link = link_of(host, line, &d, preedit.map(|p| p.1));
+    let link = link_of(host, start, line, &d, preedit.map(|p| p.1));
     if let Some(n) = doc.nodes.get_mut(text)
         && let NodeKind::Text(t) = &mut n.kind
     {
@@ -1940,7 +1957,16 @@ pub(crate) fn sync(host: NodeId) {
         }
         let row = wanted[k];
         let g = gutter_look(row);
-        let make = || build_row(host, &looks[k], line_text(row), preedit_at(row), g.as_ref());
+        let make = || {
+            build_row(
+                host,
+                starts[structure.first_line(row)],
+                &looks[k],
+                line_text(row),
+                preedit_at(row),
+                g.as_ref(),
+            )
+        };
         let (mut slot, owner) = match outer {
             Some(o) => o.with(|| create_child_owner(make)),
             None => create_child_owner(make),
@@ -2001,6 +2027,7 @@ pub(crate) fn sync(host: NodeId) {
         }
         let mut next = Vec::with_capacity(acts.len());
         let mut refills = Vec::new();
+        let mut kept_starts = Vec::new();
         for (k, (act, b)) in acts.iter().zip(built).enumerate() {
             let mut slot = match act {
                 Act::Keep(i) => old[*i].take().unwrap(),
@@ -2014,6 +2041,9 @@ pub(crate) fn sync(host: NodeId) {
             slot.src = src_of(wanted[k]);
             if matches!(act, Act::Keep(_)) {
                 slot.look = looks[k].clone();
+                if let Some(id) = slot.text {
+                    kept_starts.push((id, slot.src.start));
+                }
             }
             next.push(slot);
         }
@@ -2042,6 +2072,7 @@ pub(crate) fn sync(host: NodeId) {
             refill(
                 d,
                 host,
+                next[k].src.start,
                 &next[k],
                 look,
                 line_text(wanted[k]),
@@ -2062,6 +2093,14 @@ pub(crate) fn sync(host: NodeId) {
         e.rows = next;
         if d.get(host).is_some_and(|n| n.children != children) {
             d.set_children(host, children);
+        }
+        for (id, start) in kept_starts {
+            if let Some(n) = d.nodes.get_mut(id)
+                && let NodeKind::Text(t) = &mut n.kind
+                && let Some(l) = &mut t.row
+            {
+                l.start = start;
+            }
         }
         update_links(d, host);
         d.mark_paint();
@@ -3014,7 +3053,7 @@ mod tests {
         assert_eq!(d.shown, 13);
         let spans: Vec<_> = d.spans.iter().map(|s| s.range.clone()).collect();
         assert_eq!(spans, [0..4, 9..13]);
-        let link = link_of(NodeId::default(), line, &d, None);
+        let link = link_of(NodeId::default(), 0, line, &d, None);
         assert_eq!(link.to_display(2), 0);
         assert_eq!(link.to_display(0), 0);
         assert_eq!(link.to_display(7), 4);
@@ -3053,7 +3092,7 @@ mod tests {
         assert_eq!(d.text, "a  b ");
         assert_eq!(d.boxes.len(), 1);
         assert_eq!(d.boxes[0].0, 2);
-        let link = link_of(NodeId::default(), "a ![x](y) b", &d, None);
+        let link = link_of(NodeId::default(), 0, "a ![x](y) b", &d, None);
         assert_eq!(link.to_source(2), 2);
         assert_eq!(link.to_source(3), 10);
     }

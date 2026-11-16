@@ -242,6 +242,66 @@ fn numbers() -> Vec<String> {
     })
 }
 
+/// The rows with text nodes: what each shows and where its line starts.
+fn row_starts() -> Vec<(String, usize)> {
+    with_doc(|d| {
+        let h = d.editors[0];
+        d.nodes[h]
+            .children
+            .iter()
+            .filter_map(|&c| match &d.nodes[*d.nodes[c].children.first()?].kind {
+                NodeKind::Text(t) => t.row.as_ref().map(|r| (t.text.clone(), r.start)),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[test]
+fn rows_know_where_their_lines_start() {
+    let mut ui = mount(move || text_editor().text("ab\ncdef\ngh").w(300.0).text_size(16.0));
+    assert_eq!(
+        row_starts(),
+        [
+            ("ab ".to_owned(), 0),
+            ("cdef ".to_owned(), 3),
+            ("gh ".to_owned(), 8)
+        ]
+    );
+    let r = with_doc(|d| d.nodes[d.editors[0]].abs);
+    click(&mut ui, PointF::new(r.x as f32 + 1.0, r.y as f32 + 1.0));
+    key_with(
+        &mut ui,
+        Key::Named(NamedKey::End),
+        None,
+        Modifiers::default(),
+    );
+    typ(&mut ui, "XY");
+    assert_eq!(
+        row_starts(),
+        [
+            ("abXY ".to_owned(), 0),
+            ("cdef ".to_owned(), 5),
+            ("gh ".to_owned(), 10)
+        ]
+    );
+    key_with(
+        &mut ui,
+        Key::Named(NamedKey::Enter),
+        Some("\r"),
+        Modifiers::default(),
+    );
+    assert_eq!(
+        row_starts(),
+        [
+            ("abXY ".to_owned(), 0),
+            (" ".to_owned(), 5),
+            ("cdef ".to_owned(), 6),
+            ("gh ".to_owned(), 11)
+        ]
+    );
+}
+
 #[test]
 fn line_numbers_follow_the_lines() {
     let mut ui = mount(move || {
@@ -362,4 +422,21 @@ fn the_line_at_the_top_stays_when_the_estimates_change() {
         (after - before).abs() < 1.0,
         "the top went from line {before} to {after}"
     );
+}
+
+/// A scroll asked for after layout wins over the caret being brought into view in the same frame.
+#[test]
+fn scrolling_after_layout_wins_over_the_caret_coming_into_view() {
+    let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    let scroller = node_ref();
+    let r = editor_ref();
+    let mut ui = mount(move || editor(text, scroller).editor_ref(r));
+    let end = r.text().len();
+    r.select(end, end);
+    r.scroll_to_after_layout(0);
+    for _ in 0..3 {
+        ui.update();
+    }
+    let top = r.top_line().unwrap();
+    assert!(top < 1.0, "the view stayed at the top, at line {top}");
 }
