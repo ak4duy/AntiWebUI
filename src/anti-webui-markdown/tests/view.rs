@@ -163,6 +163,57 @@ fn links_go_to_headings_or_out() {
 }
 
 #[test]
+fn wiki_links_are_links_and_wiki_pictures_are_text() {
+    let followed = Rc::new(RefCell::new(Vec::new()));
+    let f = followed.clone();
+    let mut ui = mount(move || {
+        markdown_view("[[Plan: Phase 5]] and [[Plan|the plan]] and ![[pic.png]]")
+            .w(800.0)
+            .wiki_links(true)
+            .on_link(move |url| f.borrow_mut().push(url.to_owned()))
+    });
+    settle(&mut ui);
+    let all: Vec<String> = texts().into_iter().map(|(_, t)| t).collect();
+    assert!(all.iter().any(|t| t.contains("Plan: Phase 5")), "{all:?}");
+    assert!(all.iter().any(|t| t.contains("the plan")), "{all:?}");
+    assert!(all.iter().any(|t| t.contains("![[pic.png]]")), "{all:?}");
+    // Clicking a wiki link gives its target as it is written, without its alias.
+    let clicks: Vec<_> = with_doc(|d| {
+        d.nodes
+            .iter()
+            .filter_map(|(_, n)| match &n.kind {
+                NodeKind::Text(t) => t.rich.as_ref().map(|r| {
+                    r.spans
+                        .iter()
+                        .filter_map(|s| {
+                            s.on_click
+                                .clone()
+                                .map(|c| (t.text[s.range.clone()].to_owned(), c))
+                        })
+                        .collect::<Vec<_>>()
+                }),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    });
+    for (label, click) in &clicks {
+        if label == "Plan: Phase 5" || label == "the plan" {
+            click();
+        }
+    }
+    assert_eq!(*followed.borrow(), ["[[Plan: Phase 5]]", "[[Plan]]"]);
+}
+
+#[test]
+fn wiki_links_are_off_by_default() {
+    let mut ui = mount(|| markdown_view("[[Plan]]").w(800.0));
+    settle(&mut ui);
+    let all: Vec<String> = texts().into_iter().map(|(_, t)| t).collect();
+    assert!(all.iter().any(|t| t.contains("[[Plan]]")), "{all:?}");
+}
+
+#[test]
 fn emoji_are_pictures_among_the_words() {
     let mut ui = mount(|| {
         markdown_view("Party :party: time and :unknown:")

@@ -2,7 +2,8 @@
 //! nothing of the parser stays around once a document is read.
 
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag,
+    TagEnd,
 };
 use std::ops::Range;
 use std::rc::Rc;
@@ -98,9 +99,14 @@ pub(crate) struct Top {
     pub block: Block,
 }
 
-pub(crate) fn options() -> Options {
+pub(crate) fn options(wiki: bool) -> Options {
     let math = if cfg!(feature = "math") {
         Options::ENABLE_MATH
+    } else {
+        Options::empty()
+    };
+    let wiki = if wiki {
+        Options::ENABLE_WIKILINKS
     } else {
         Options::empty()
     };
@@ -111,6 +117,7 @@ pub(crate) fn options() -> Options {
         | Options::ENABLE_GFM
         | Options::ENABLE_SUPERSCRIPT
         | Options::ENABLE_SUBSCRIPT
+        | wiki
 }
 
 enum Frame {
@@ -127,6 +134,12 @@ enum Frame {
     Inlines(Inlines),
     Image {
         url: String,
+        alt: String,
+    },
+    /// `![[target]]`, which stays as it is written.
+    WikiImage {
+        target: String,
+        pothole: bool,
         alt: String,
     },
     /// The language, the text, and where it starts.
@@ -173,7 +186,8 @@ impl Builder {
     }
 
     fn text(&mut self, text: &str, extra: u8) {
-        if let Some(Frame::Image { alt, .. }) = self.stack.last_mut() {
+        if let Some(Frame::Image { alt, .. } | Frame::WikiImage { alt, .. }) = self.stack.last_mut()
+        {
             alt.push_str(text);
             return;
         }
@@ -278,14 +292,33 @@ impl Builder {
             Tag::Strikethrough => self.open_mark(mark::STRIKE, true),
             Tag::Superscript => self.open_mark(mark::SUPER, true),
             Tag::Subscript => self.open_mark(mark::SUB, true),
-            Tag::Link { dest_url, .. } => {
+            Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            } => {
+                let url = match link_type {
+                    LinkType::WikiLink { .. } => format!("[[{dest_url}]]"),
+                    _ => dest_url.to_string(),
+                };
                 self.links.push(self.marks.link.take());
-                self.marks.link = Some(Rc::from(dest_url.as_ref()));
+                self.marks.link = Some(Rc::from(url));
             }
-            Tag::Image { dest_url, .. } => self.stack.push(Frame::Image {
-                url: dest_url.to_string(),
-                alt: String::new(),
-            }),
+            Tag::Image {
+                link_type,
+                dest_url,
+                ..
+            } => match link_type {
+                LinkType::WikiLink { has_pothole } => self.stack.push(Frame::WikiImage {
+                    target: dest_url.to_string(),
+                    pothole: has_pothole,
+                    alt: String::new(),
+                }),
+                _ => self.stack.push(Frame::Image {
+                    url: dest_url.to_string(),
+                    alt: String::new(),
+                }),
+            },
             Tag::DefinitionList
             | Tag::DefinitionListTitle
             | Tag::DefinitionListDefinition
@@ -392,14 +425,27 @@ impl Builder {
             TagEnd::Superscript => self.open_mark(mark::SUPER, false),
             TagEnd::Subscript => self.open_mark(mark::SUB, false),
             TagEnd::Link => self.marks.link = self.links.pop().flatten(),
-            TagEnd::Image => {
-                if let Some(Frame::Image { url, alt }) = self.stack.pop() {
+            TagEnd::Image => match self.stack.pop() {
+                Some(Frame::Image { url, alt }) => {
                     let link = self.marks.link.clone();
                     if let Some(inlines) = self.inlines() {
                         inlines.push(Piece::Image { url, alt, link });
                     }
                 }
-            }
+                Some(Frame::WikiImage {
+                    target,
+                    pothole,
+                    alt,
+                }) => {
+                    let text = if pothole {
+                        format!("![[{target}|{alt}]]")
+                    } else {
+                        format!("![[{target}]]")
+                    };
+                    self.text(&text, 0);
+                }
+                _ => {}
+            },
             TagEnd::DefinitionList
             | TagEnd::DefinitionListTitle
             | TagEnd::DefinitionListDefinition
@@ -420,7 +466,7 @@ fn level_of(level: HeadingLevel) -> u8 {
 }
 
 /// Reads a whole document.
-pub(crate) fn parse(source: &str) -> Vec<Top> {
+pub(crate) fn parse(source: &str, wiki: bool) -> Vec<Top> {
     let mut b = Builder {
         tops: Vec::new(),
         stack: Vec::new(),
@@ -429,7 +475,7 @@ pub(crate) fn parse(source: &str) -> Vec<Top> {
         links: Vec::new(),
         start: 0,
     };
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    for (event, range) in Parser::new_ext(source, options(wiki)).into_offset_iter() {
         match event {
             Event::Start(tag) => b.start(tag, range.start),
             Event::End(tag) => b.end(tag, range.end),
@@ -584,7 +630,10 @@ mod tests {
 
     #[test]
     fn blocks_and_marks() {
-        let doc = parse("# Title\n\nSome **bold _both_** and `code`.\n\n---\n");
+        let doc = parse(
+            "# Title\n\nSome **bold _both_** and `code`.\n\n---\n",
+            false,
+        );
         assert_eq!(doc.len(), 3);
         assert_eq!(doc[0].block, Block::Heading(1, vec![text("Title", 0)]));
         assert_eq!(doc[0].range, 0..8);
@@ -608,7 +657,10 @@ mod tests {
     #[cfg(feature = "math")]
     #[test]
     fn formulas_among_words_and_on_lines_of_their_own() {
-        let doc = parse("Energy $E = mc^2$ here.\n\n$$\n\\frac{a}{b}\n$$\n\n![a $x$](p.png)\n");
+        let doc = parse(
+            "Energy $E = mc^2$ here.\n\n$$\n\\frac{a}{b}\n$$\n\n![a $x$](p.png)\n",
+            false,
+        );
         let Block::Paragraph(p) = &doc[0].block else {
             panic!()
         };
@@ -646,6 +698,7 @@ mod tests {
     fn lists_tasks_tables_and_quotes() {
         let doc = parse(
             "- [x] done\n- [ ] todo\n  1. inner\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\n> [!NOTE]\n> hi\n",
+            false,
         );
         let Block::List { start: None, items } = &doc[0].block else {
             panic!("{:?}", doc[0].block)
@@ -667,7 +720,10 @@ mod tests {
 
     #[test]
     fn links_images_and_code() {
-        let doc = parse("[a **b**](u) ![alt](p.png)\n\n```mermaid x\ngraph TD\n```\n");
+        let doc = parse(
+            "[a **b**](u) ![alt](p.png)\n\n```mermaid x\ngraph TD\n```\n",
+            false,
+        );
         let Block::Paragraph(p) = &doc[0].block else {
             panic!()
         };
@@ -707,6 +763,48 @@ mod tests {
                 text: "graph TD".into()
             }
         );
+    }
+
+    #[test]
+    fn wiki_links_and_wiki_pictures() {
+        let doc = parse(
+            "[[Plan#Now]] [[Plan|the plan]] ![[pic.png]] ![[a|b]]\n",
+            true,
+        );
+        let Block::Paragraph(p) = &doc[0].block else {
+            panic!()
+        };
+        assert_eq!(
+            p[0],
+            Piece::Text(
+                "Plan#Now".into(),
+                Marks {
+                    bits: 0,
+                    link: Some(Rc::from("[[Plan#Now]]"))
+                }
+            )
+        );
+        assert_eq!(
+            p[2],
+            Piece::Text(
+                "the plan".into(),
+                Marks {
+                    bits: 0,
+                    link: Some(Rc::from("[[Plan]]"))
+                }
+            )
+        );
+        // A picture that is a wiki link stays as it is written.
+        assert_eq!(p[3], text(" ![[pic.png]] ![[a|b]]", 0));
+    }
+
+    #[test]
+    fn wiki_links_are_off_by_default() {
+        let doc = parse("[[Plan]]\n", false);
+        let Block::Paragraph(p) = &doc[0].block else {
+            panic!()
+        };
+        assert_eq!(p, &vec![text("[[Plan]]", 0)]);
     }
 
     #[test]

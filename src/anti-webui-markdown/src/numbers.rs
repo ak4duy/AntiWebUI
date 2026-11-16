@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn equations_are_numbered_one_after_the_other() {
         let doc = "$$\n\\begin{equation} a \\label{a} \\end{equation}\n$$\n\nText $x$.\n\n```math\n\\begin{align} b \\label{b} \\\\ c \\tag{C} \\label{c} \\\\ d \\end{align}\n```\n\n- $$\\begin{equation} e \\label{e} \\end{equation}$$\n";
-        let tops = crate::parse::parse(doc);
+        let tops = crate::parse::parse(doc, false);
         let formulas = of_blocks(&tops);
         assert_eq!(formulas.len(), 3);
         let n = Numbers::of(&Numbers::default(), &formulas);

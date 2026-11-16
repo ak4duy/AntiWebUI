@@ -22,6 +22,7 @@ pub struct MarkdownSplitEditor {
     on_link: OnLink,
     on_key_down: Option<Rc<dyn Fn(&KeyboardEvent)>>,
     list_keys: bool,
+    wiki: bool,
     image: Pictures,
     emoji: Emojis,
     editor_ref: Option<EditorRef>,
@@ -39,6 +40,7 @@ pub fn markdown_split_editor(source: Signal<String>) -> MarkdownSplitEditor {
         on_link: None,
         on_key_down: None,
         list_keys: true,
+        wiki: false,
         image: None,
         emoji: None,
         editor_ref: None,
@@ -61,7 +63,8 @@ impl MarkdownSplitEditor {
         self
     }
 
-    /// Called with the target of a link clicked on the right.
+    /// Called with the target of a link clicked on the right. A wiki link is given as `[[target]]`,
+    /// as it is written without its alias.
     pub fn on_link(mut self, f: impl Fn(&str) + 'static) -> Self {
         self.on_link = Some(Rc::new(f));
         self
@@ -77,6 +80,13 @@ impl MarkdownSplitEditor {
     /// them in `on_key_down` instead.
     pub fn list_keys(mut self, on: bool) -> Self {
         self.list_keys = on;
+        self
+    }
+
+    /// Whether `[[target]]` is a link. Off by default; a clicked one is given to `on_link` as
+    /// `[[target]]`, without its alias.
+    pub fn wiki_links(mut self, on: bool) -> Self {
+        self.wiki = on;
         self
     }
 
@@ -266,6 +276,7 @@ impl IntoView for MarkdownSplitEditor {
         let source = self.source;
         let on_key_down = self.on_key_down;
         let lists = self.list_keys;
+        let wiki = self.wiki;
         let editor = self.editor_ref.unwrap_or_else(editor_ref);
         let preview = node_ref();
         let page = node_ref();
@@ -405,6 +416,7 @@ impl IntoView for MarkdownSplitEditor {
         let mut view = markdown_view(move || source.get())
             .theme(self.theme.clone())
             .code_theme(self.code_theme.clone())
+            .wiki_links(wiki)
             .anchors(anchors);
         if let Some(f) = self.on_link {
             view = view.on_link(move |u| f(u));

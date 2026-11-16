@@ -8,7 +8,7 @@ use crate::theme::MarkdownTheme;
 use crate::view::{Ctx, Highlight, OnLink, Pictures};
 use anti_webui_core::event::KeyboardEvent;
 use anti_webui_core::prelude::*;
-use pulldown_cmark::{CodeBlockKind, CowStr, Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, LinkType, Parser, Tag, TagEnd};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -314,7 +314,7 @@ impl Decorator {
                     other => Cow::Owned(other.to_string()),
                 }
             }
-            for (event, range) in Parser::new_ext(text, options()).into_offset_iter() {
+            for (event, range) in Parser::new_ext(text, options(self.ctx.wiki)).into_offset_iter() {
                 match &event {
                     Event::DisplayMath(t) => formulas.push((range.start, text_of(t))),
                     Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info)))
@@ -456,6 +456,8 @@ impl Decorator {
             first: Option<usize>,
             last: usize,
             task: bool,
+            /// `![[x]]`, which stays as it is written.
+            wiki: bool,
         }
         let mut stack: Vec<Open> = Vec::new();
         let mut whole: Option<Row> = None;
@@ -485,7 +487,7 @@ impl Decorator {
             with_footnotes = format!("{src}{footnotes}");
             &with_footnotes
         };
-        for (event, range) in Parser::new_ext(parsed, options()).into_offset_iter() {
+        for (event, range) in Parser::new_ext(parsed, options(self.ctx.wiki)).into_offset_iter() {
             // What was put after the block for its footnotes isn't shown.
             if range.start >= src.len() {
                 continue;
@@ -667,6 +669,13 @@ impl Decorator {
                         first: None,
                         last: 0,
                         task: false,
+                        wiki: matches!(
+                            tag,
+                            Tag::Image {
+                                link_type: LinkType::WikiLink { .. },
+                                ..
+                            }
+                        ),
                     });
                 }
                 Event::End(_) => {
@@ -716,7 +725,9 @@ impl Decorator {
                             }
                         }
                         TagEnd::Image => {
-                            if touches(r.start, r.end) {
+                            if open.wiki {
+                                // `![[x]]` stays as it is written.
+                            } else if touches(r.start, r.end) {
                                 mark(&mut lines, r.clone(), bit::SYNTAX);
                             } else {
                                 let l = line_of(r.start);
@@ -1095,6 +1106,7 @@ pub struct MarkdownEditor {
     on_link: OnLink,
     on_key_down: Option<Rc<dyn Fn(&KeyboardEvent)>>,
     list_keys: bool,
+    wiki: bool,
     image: Pictures,
     highlight: Option<Rc<Highlight>>,
     #[cfg(feature = "code")]
@@ -1109,6 +1121,7 @@ pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
         on_link: None,
         on_key_down: None,
         list_keys: true,
+        wiki: false,
         image: None,
         highlight: None,
         #[cfg(feature = "code")]
@@ -1123,7 +1136,8 @@ impl MarkdownEditor {
         self
     }
 
-    /// Called with the target of a link clicked with Ctrl held.
+    /// Called with the target of a link clicked with Ctrl held. A wiki link is given as
+    /// `[[target]]`, as it is written without its alias.
     pub fn on_link(mut self, f: impl Fn(&str) + 'static) -> Self {
         self.on_link = Some(Rc::new(f));
         self
@@ -1139,6 +1153,13 @@ impl MarkdownEditor {
     /// them in `on_key_down` instead.
     pub fn list_keys(mut self, on: bool) -> Self {
         self.list_keys = on;
+        self
+    }
+
+    /// Whether `[[target]]` is a link. Off by default; a clicked one is given to `on_link` as
+    /// `[[target]]`, without its alias.
+    pub fn wiki_links(mut self, on: bool) -> Self {
+        self.wiki = on;
         self
     }
 
@@ -1271,13 +1292,18 @@ pub(crate) fn list_keys(editor: EditorRef, e: &KeyboardEvent) {
 }
 
 /// The link at a byte of the text, by looking at its line.
-fn link_at(text: &str, at: usize) -> Option<String> {
+fn link_at(text: &str, at: usize, wiki: bool) -> Option<String> {
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
     let line = &text[start..end];
     let mut url = None;
-    for (event, range) in Parser::new_ext(line, options()).into_offset_iter() {
-        if let Event::Start(Tag::Link { dest_url, .. }) = event
+    for (event, range) in Parser::new_ext(line, options(wiki)).into_offset_iter() {
+        if let Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            ..
+        }) = event
+            && !matches!(link_type, LinkType::WikiLink { .. })
             && (range.start..=range.end).contains(&(at - start))
         {
             url = Some(dest_url.to_string());
@@ -1292,6 +1318,7 @@ impl IntoView for MarkdownEditor {
         let on_link = self.on_link.clone();
         let on_key_down = self.on_key_down;
         let lists = self.list_keys;
+        let wiki = self.wiki;
         #[cfg(feature = "code")]
         let (highlight, ready) = crate::view::code_colors(self.highlight, self.code_theme);
         #[cfg(not(feature = "code"))]
@@ -1302,6 +1329,7 @@ impl IntoView for MarkdownEditor {
             self.image,
             None,
             highlight.clone(),
+            wiki,
         );
         let deco = Rc::new(Decorator::new(self.theme.clone(), ctx, highlight, editor));
         if let Some(ready) = ready {
@@ -1338,7 +1366,7 @@ impl IntoView for MarkdownEditor {
                 }
                 let url = editor
                     .offset_at(p.position)
-                    .and_then(|at| link_at(&editor.text(), at));
+                    .and_then(|at| link_at(&editor.text(), at, wiki));
                 if let Some(url) = url {
                     open(&url);
                 }
@@ -1383,7 +1411,9 @@ mod tests {
     #[test]
     fn a_link_is_found_by_its_line() {
         let t = "x\nsee [the docs](https://a.b) here\n";
-        assert_eq!(link_at(t, 8).as_deref(), Some("https://a.b"));
-        assert_eq!(link_at(t, 3), None);
+        assert_eq!(link_at(t, 8, false).as_deref(), Some("https://a.b"));
+        assert_eq!(link_at(t, 3, false), None);
+        // A wiki link is the app's to follow.
+        assert_eq!(link_at("see [[Plan]] here", 7, true), None);
     }
 }
