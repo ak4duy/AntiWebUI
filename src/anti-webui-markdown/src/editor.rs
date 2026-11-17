@@ -1102,6 +1102,7 @@ fn check_box(done: bool, toggle: impl Fn() + 'static) -> View {
 /// A Markdown editor that shows what it says as it is written, as Obsidian's live preview.
 pub struct MarkdownEditor {
     source: Signal<String>,
+    ghost: Option<Signal<Option<String>>>,
     theme: MarkdownTheme,
     on_link: OnLink,
     on_key_down: Option<Rc<dyn Fn(&KeyboardEvent)>>,
@@ -1117,6 +1118,7 @@ pub struct MarkdownEditor {
 pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
     MarkdownEditor {
         source,
+        ghost: None,
         theme: MarkdownTheme::default(),
         on_link: None,
         on_key_down: None,
@@ -1131,6 +1133,14 @@ pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
 }
 
 impl MarkdownEditor {
+    /// Text shown after the caret, dimmed, as a suggestion of what to type. It is not part of the
+    /// text, and it is shown while the editor is focused. It is hidden while there is a selection
+    /// or an IME pre-edit.
+    pub fn ghost_text(mut self, text: Signal<Option<String>>) -> Self {
+        self.ghost = Some(text);
+        self
+    }
+
     pub fn theme(mut self, theme: MarkdownTheme) -> Self {
         self.theme = theme;
         self
@@ -1359,6 +1369,9 @@ impl IntoView for MarkdownEditor {
                     list_keys(editor, e);
                 }
             });
+        if let Some(ghost) = self.ghost {
+            e = e.ghost_text(ghost);
+        }
         if let Some(open) = on_link {
             e = e.on_click(move |p| {
                 if !p.modifiers.primary() {

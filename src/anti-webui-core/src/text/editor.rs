@@ -14,7 +14,7 @@ use crate::platform::{ImePurpose, ImeState};
 use crate::reactive::{Owner, Signal, batch, create_child_owner, untrack};
 use crate::tree::{Document, Node, NodeId, NodeKind, TextData, with_doc};
 use crate::view::{IntoView, View, create_node};
-use anti_webui_style::{Length, Style, Styled, TextAlign};
+use anti_webui_style::{Color, Length, Style, Styled, TextAlign};
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
@@ -241,6 +241,19 @@ pub(crate) struct RowSlot {
     text: Option<NodeId>,
     gutter: Option<GutterSlot>,
     owner: Option<Owner>,
+    /// The ghost text it shows, and the byte of the line it is shown at.
+    ghost: Option<(usize, String)>,
+}
+
+impl RowSlot {
+    /// Whether it shows the same ghost text at the same byte.
+    fn same_ghost(&self, ghost: Option<(usize, &str)>) -> bool {
+        match (&self.ghost, ghost) {
+            (None, None) => true,
+            (Some((at, g)), Some((now_at, now))) => *at == now_at && g.as_str() == now,
+            _ => false,
+        }
+    }
 }
 
 /// The box of a row's line number.
@@ -259,6 +272,7 @@ struct ShownKey {
     focus: usize,
     focused: bool,
     preedit: Option<Preedit>,
+    ghost: Option<String>,
     looks: u64,
 }
 
@@ -281,6 +295,8 @@ pub struct RowLink {
     pub selected: Option<Range<usize>>,
     /// The pre-edit in the shown text, and the IME's range in it.
     pub preedit: Option<ShownPreedit>,
+    /// The ghost text in the shown text, and the byte of the line it is shown at.
+    pub ghost: Option<(Range<usize>, usize)>,
     pub caret: Option<usize>,
     /// Where what is dragged over the editor would go, when it is in this line.
     pub drop_caret: Option<usize>,
@@ -290,6 +306,12 @@ impl RowLink {
     /// Where a byte of the line is in the shown text. A byte that is hidden is where what follows
     /// it is shown.
     pub fn to_display(&self, at: usize) -> usize {
+        // The caret stays before the ghost, which is shown after it.
+        if let Some((range, ghost_at)) = &self.ghost
+            && at == *ghost_at
+        {
+            return range.start;
+        }
         for &(disp, src, len) in &self.pieces {
             if at < src {
                 return disp;
@@ -304,6 +326,12 @@ impl RowLink {
     /// Which byte of the line a place in the shown text is. A place in a node or the pre-edit is
     /// after what is shown before it.
     pub fn to_source(&self, at: usize) -> usize {
+        // What is shown of the ghost is the caret's place in the text.
+        if let Some((range, ghost_at)) = &self.ghost
+            && range.contains(&at)
+        {
+            return *ghost_at;
+        }
         if at >= self.shown {
             return self.len;
         }
@@ -329,6 +357,8 @@ struct Display {
     spans: Vec<SpanData>,
     shown: usize,
     preedit: Option<Range<usize>>,
+    ghost: Option<Range<usize>>,
+    ghost_at: Option<usize>,
 }
 
 /// The ranges of `ranges` that are in `line`, in order, not overlapping and on its letters.
@@ -346,13 +376,49 @@ fn tidy<T: Clone>(ranges: &[(Range<usize>, T)], line: &str) -> Vec<(Range<usize>
     out
 }
 
+#[cfg(test)]
 fn display(line: &str, look: &LineLook, preedit: Option<(usize, &str)>) -> Display {
+    display_with(line, look, preedit, None, Color::BLACK)
+}
+
+/// The style of the ghost text: the font of the letters around the caret, in their color at the
+/// opacity of a placeholder.
+fn ghost_style(around: Option<&Style>, color: Color) -> Rc<Style> {
+    let mut style = Style::default();
+    if let Some(around) = around {
+        style.font_family = around.font_family.clone();
+        style.font_size = around.font_size;
+        style.font_weight = around.font_weight;
+        style.font_style = around.font_style;
+        style.font_axes = around.font_axes.clone();
+        style.letter_spacing = around.letter_spacing;
+    }
+    style.color = Some(color.with_alpha(color.a * 0.45));
+    style.underline = Some(false);
+    style.strikethrough = Some(false);
+    Rc::new(style)
+}
+
+fn display_with(
+    line: &str,
+    look: &LineLook,
+    preedit: Option<(usize, &str)>,
+    ghost: Option<(usize, &str)>,
+    base_color: Color,
+) -> Display {
     let cuts = tidy(&look.replace, line);
     let mut text = String::with_capacity(line.len() + 1);
     let mut pieces = Vec::new();
     let mut boxes = Vec::new();
     let mut pre_range = None;
-    let mut pending = preedit;
+    let mut ghost_range = None;
+    let mut ghost_at = None;
+    // The pre-edit and the ghost are not shown together.
+    let mut pending = match (preedit, ghost) {
+        (Some((p, s)), _) => Some((p, s, true)),
+        (None, Some((p, s))) => Some((p, s, false)),
+        _ => None,
+    };
     let show = |from: usize, to: usize, text: &mut String, pieces: &mut Vec<_>| {
         if from < to {
             pieces.push((text.len(), from, to - from));
@@ -365,24 +431,34 @@ fn display(line: &str, look: &LineLook, preedit: Option<(usize, &str)>) -> Displ
         .map(|(r, w)| (r.clone(), w.as_ref()))
         .chain(std::iter::once((line.len()..line.len(), None)));
     for (cut, widget) in visible {
-        // What is shown before the cut, with the pre-edit where it goes.
+        // What is shown before the cut, with the pre-edit or the ghost where it goes.
         match pending {
-            Some((p, s)) if at <= p && p <= cut.start => {
+            Some((p, s, pre)) if at <= p && p <= cut.start => {
                 show(at, p, &mut text, &mut pieces);
                 let start = text.len();
                 text.push_str(s);
-                pre_range = Some(start..text.len());
+                if pre {
+                    pre_range = Some(start..text.len());
+                } else {
+                    ghost_range = Some(start..text.len());
+                    ghost_at = Some(p);
+                }
                 show(p, cut.start, &mut text, &mut pieces);
                 pending = None;
             }
             _ => show(at, cut.start, &mut text, &mut pieces),
         }
-        if let Some((p, s)) = pending
+        if let Some((p, s, pre)) = pending
             && cut.contains(&p)
         {
             let start = text.len();
             text.push_str(s);
-            pre_range = Some(start..text.len());
+            if pre {
+                pre_range = Some(start..text.len());
+            } else {
+                ghost_range = Some(start..text.len());
+                ghost_at = Some(p);
+            }
             pending = None;
         }
         if let Some(w) = widget {
@@ -390,10 +466,15 @@ fn display(line: &str, look: &LineLook, preedit: Option<(usize, &str)>) -> Displ
         }
         at = cut.end;
     }
-    if let Some((_, s)) = pending {
+    if let Some((p, s, pre)) = pending {
         let start = text.len();
         text.push_str(s);
-        pre_range = Some(start..text.len());
+        if pre {
+            pre_range = Some(start..text.len());
+        } else {
+            ghost_range = Some(start..text.len());
+            ghost_at = Some(p);
+        }
     }
     let shown = text.len();
     text.push(' ');
@@ -427,6 +508,25 @@ fn display(line: &str, look: &LineLook, preedit: Option<(usize, &str)>) -> Displ
             spans.push(span(r.clone(), &style));
         }
     }
+    // The ghost is dimmed, in the style of the letters around it.
+    if let (Some(range), Some((p, _))) = (&ghost_range, ghost) {
+        let around = look
+            .marks
+            .iter()
+            .find(|(r, _)| r.contains(&p))
+            .or_else(|| look.marks.iter().rev().find(|(r, _)| r.end == p));
+        let color = around
+            .and_then(|(_, s)| s.color)
+            .or(look.style.as_ref().and_then(|s| s.color))
+            .unwrap_or(base_color);
+        spans.push(SpanData {
+            range: range.clone(),
+            style: ghost_style(around.map(|(_, s)| &**s), color),
+            hover: None,
+            align: VerticalAlign::Baseline,
+            on_click: None,
+        });
+    }
     spans.sort_by_key(|s| s.range.start);
     let mut end = 0;
     spans.retain_mut(|s| {
@@ -441,6 +541,8 @@ fn display(line: &str, look: &LineLook, preedit: Option<(usize, &str)>) -> Displ
         spans,
         shown,
         preedit: pre_range,
+        ghost: ghost_range,
+        ghost_at,
     }
 }
 
@@ -453,6 +555,8 @@ pub struct EditorData {
     pub anchor: usize,
     pub focus: usize,
     pub preedit: Option<Preedit>,
+    /// Text shown after the caret, dimmed, which is not part of the text.
+    pub(crate) ghost: Option<String>,
     pub read_only: bool,
     pub purpose: ImePurpose,
     /// Changes whenever the text does.
@@ -548,6 +652,7 @@ impl EditorData {
             anchor: 0,
             focus: 0,
             preedit: None,
+            ghost: None,
             read_only: false,
             purpose: ImePurpose::Normal,
             version: 0,
@@ -1404,6 +1509,7 @@ fn link_of(
             .preedit
             .clone()
             .map(|r| (r, preedit.and_then(|p| p.cursor))),
+        ghost: d.ghost.clone().zip(d.ghost_at),
         caret: None,
         drop_caret: None,
     }
@@ -1433,18 +1539,27 @@ struct GutterLook<'a> {
 }
 
 /// Makes a row's nodes, under the current owner.
+#[allow(clippy::too_many_arguments)]
 fn build_row(
     host: NodeId,
     start: usize,
     row: &Row,
     line: &str,
     preedit: Option<(usize, &Preedit)>,
+    ghost: Option<(usize, &str)>,
+    color: Color,
     gutter: Option<&GutterLook>,
 ) -> RowSlot {
     let gutter_w = gutter.map(|g| g.logical);
     let (div, text, children) = match row {
         Row::Line(look) => {
-            let d = display(line, look, preedit.map(|(p, pe)| (p, pe.text.as_str())));
+            let d = display_with(
+                line,
+                look,
+                preedit.map(|(p, pe)| (p, pe.text.as_str())),
+                ghost,
+                color,
+            );
             let children: Vec<NodeId> = d.boxes.iter().map(|(_, w)| (w.build)().0).collect();
             let boxes = d
                 .boxes
@@ -1509,6 +1624,7 @@ fn build_row(
         text,
         gutter,
         owner: None,
+        ghost: ghost.map(|(at, g)| (at, g.to_owned())),
     }
 }
 
@@ -1522,6 +1638,8 @@ fn refill(
     look: &Rc<LineLook>,
     line: &str,
     preedit: Option<(usize, &Preedit)>,
+    ghost: Option<(usize, &str)>,
+    color: Color,
     text_changed: bool,
     gutter_w: Option<f32>,
 ) {
@@ -1534,9 +1652,11 @@ fn refill(
         n.style.base = row_style(look.style.as_ref(), gutter_w);
         doc.mark_style_of(slot.div);
     }
-    // Only the box looks different: the letters stay as they are.
+    // Only the box looks different: the letters stay as they are. The ghost is part of the
+    // letters, so a row that showed one, or shows another now, is shown again.
     let same_letters = !text_changed
         && preedit.is_none()
+        && slot.same_ghost(ghost)
         && old.marks == look.marks
         && old.replace == look.replace
         && old.raised == look.raised;
@@ -1552,7 +1672,13 @@ fn refill(
     if same_letters {
         return;
     }
-    let d = display(line, look, preedit.map(|(p, pe)| (p, pe.text.as_str())));
+    let d = display_with(
+        line,
+        look,
+        preedit.map(|(p, pe)| (p, pe.text.as_str())),
+        ghost,
+        color,
+    );
     let link = link_of(host, start, line, &d, preedit.map(|p| p.1));
     if let Some(n) = doc.nodes.get_mut(text)
         && let NodeKind::Text(t) = &mut n.kind
@@ -1669,6 +1795,7 @@ pub(crate) fn sync(host: NodeId) {
         preedit_line: Option<usize>,
         view: i32,
         font: f32,
+        color: Color,
         scale: crate::geometry::Scale,
         old_gutter_w: i32,
         gutter_x: i32,
@@ -1677,6 +1804,7 @@ pub(crate) fn sync(host: NodeId) {
         let focused = d.state.focused == Some(host);
         let view = d.viewport.height;
         let font = d.nodes.get(host)?.computed.font_size * d.scale.as_f32();
+        let color = d.nodes.get(host)?.computed.color;
         let scale = d.scale;
         let e = d.get_mut(host)?.editor_mut()?;
         let key = ShownKey {
@@ -1685,6 +1813,7 @@ pub(crate) fn sync(host: NodeId) {
             focus: e.focus,
             focused,
             preedit: e.preedit.clone(),
+            ghost: e.ghost.clone(),
             looks: e.looks_version,
         };
         let changed = e.shown_key.as_ref() != Some(&key);
@@ -1701,6 +1830,7 @@ pub(crate) fn sync(host: NodeId) {
             preedit_line: e.preedit_line,
             view,
             font,
+            color,
             scale,
             old_gutter_w: e.gutter_w,
             gutter_x: e.gutter_x,
@@ -1732,6 +1862,7 @@ pub(crate) fn sync(host: NodeId) {
         preedit_line,
         view,
         font,
+        color,
         scale,
         old_gutter_w,
         gutter_x,
@@ -1834,6 +1965,28 @@ pub(crate) fn sync(host: NodeId) {
         (preedit_line_now == Some(f)).then(|| (key.focus - starts[f], pe))
     };
     let old_preedit = preedit_line.and_then(follow);
+    // The ghost is shown after the caret on its line, while nothing is selected and no pre-edit
+    // is being written.
+    let ghost = key.ghost.as_deref().filter(|g| !g.is_empty());
+    let ghost_line = ghost.map(|_| line_of(&starts, key.focus));
+    let ghost_shown =
+        ghost.filter(|_| key.focused && key.anchor == key.focus && key.preedit.is_none());
+    let ghost_at = |row: usize, look: &Row| -> Option<(usize, &str)> {
+        let text = ghost_shown?;
+        let first = structure.first_line(row);
+        if ghost_line != Some(first) {
+            return None;
+        }
+        let Row::Line(look) = look else {
+            return None;
+        };
+        let at = key.focus - starts[first];
+        // Not where a decoration hides the text.
+        if look.replace.iter().any(|(r, _)| r.contains(&at)) {
+            return None;
+        }
+        Some((at, text))
+    };
 
     // Where the rows that have nodes went.
     let mut slot_at: Vec<(usize, usize)> = Vec::new();
@@ -1934,12 +2087,15 @@ pub(crate) fn sync(host: NodeId) {
             || s.look.lines() != looks[k].lines();
         let pre = old_preedit.is_some_and(|l| (row_lines(&structure, row)).contains(&l))
             || preedit_at(row).is_some();
+        let ghost_now = ghost_at(row, &looks[k]);
+        let ghost_changed = !s.same_ghost(ghost_now);
         let can_refill = matches!((&s.look, &looks[k]), (Row::Line(_), Row::Line(_)))
             && !s.look.has_widgets()
             && !looks[k].has_widgets();
-        if !text_changed && !pre && s.look.same_look(&looks[k]) && !restyle {
+        if !text_changed && !pre && !ghost_changed && s.look.same_look(&looks[k]) && !restyle {
             acts.push(Act::Keep(i));
         } else if can_refill && !restyle {
+            // `refill` sees whether the ghost changed from the row itself.
             acts.push(Act::Refill(i, text_changed || pre));
         } else {
             acts.push(Act::Build);
@@ -1964,6 +2120,8 @@ pub(crate) fn sync(host: NodeId) {
                 &looks[k],
                 line_text(row),
                 preedit_at(row),
+                ghost_at(row, &looks[k]),
+                color,
                 g.as_ref(),
             )
         };
@@ -2069,6 +2227,7 @@ pub(crate) fn sync(host: NodeId) {
         for &(k, changed) in &refills {
             let Row::Line(look) = &looks[k] else { continue };
             let logical = gutter_w.map(|w| w as f32 / scale.as_f32());
+            let ghost = ghost_at(wanted[k], &looks[k]);
             refill(
                 d,
                 host,
@@ -2077,10 +2236,13 @@ pub(crate) fn sync(host: NodeId) {
                 look,
                 line_text(wanted[k]),
                 preedit_at(wanted[k]),
+                ghost,
+                color,
                 changed,
                 logical,
             );
             next[k].look = looks[k].clone();
+            next[k].ghost = ghost.map(|(at, g)| (at, g.to_owned()));
         }
         for (k, slot) in next.iter_mut().enumerate() {
             if let (Some(g), Some(look)) = (&mut slot.gutter, gutter_look(wanted[k])) {
@@ -3078,6 +3240,31 @@ mod tests {
         assert_eq!(d.preedit, Some(2..4));
         let spans: Vec<_> = d.spans.iter().map(|s| s.range.clone()).collect();
         assert_eq!(spans, [0..2, 2..4, 4..6]);
+    }
+
+    #[test]
+    fn the_ghost_is_shown_at_the_caret_in_a_dim_style() {
+        let style = Rc::new(Style::default());
+        let look = LineLook {
+            style: None,
+            marks: vec![(2..6, style)],
+            replace: vec![(0..2, None), (6..8, None)],
+            raised: vec![],
+        };
+        let d = display_with("**bold**", &look, None, Some((4, "XY")), Color::BLACK);
+        assert_eq!(d.text, "boXYld ");
+        assert_eq!(d.ghost, Some(2..4));
+        let spans: Vec<_> = d.spans.iter().map(|s| s.range.clone()).collect();
+        assert_eq!(spans, [0..2, 2..4, 4..6]);
+        assert_eq!(d.spans[1].style.color, Some(Color::BLACK.with_alpha(0.45)));
+        let link = link_of(NodeId::default(), 0, "**bold**", &d, None);
+        // The caret stays before the ghost; what comes after it skips the ghost.
+        assert_eq!(link.to_display(4), 2);
+        assert_eq!(link.to_display(5), 5);
+        assert_eq!(link.to_source(2), 4);
+        assert_eq!(link.to_source(3), 4);
+        assert_eq!(link.to_source(4), 4);
+        assert_eq!(link.to_source(5), 5);
     }
 
     #[test]

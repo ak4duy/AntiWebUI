@@ -265,6 +265,82 @@ fn the_pre_edit_shows_in_its_line_and_commits_into_the_text() {
 }
 
 #[test]
+fn the_ghost_shows_after_the_caret_and_is_not_in_the_text() {
+    let source = signal("ab\ncd".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let mut ui = mount(move || editor(source).ghost_text(ghost));
+    click(&mut ui, PointF::new(1.0, 10.0), 0);
+    named(&mut ui, NamedKey::ArrowRight);
+    assert_eq!(rows()[0].0, "aXYb");
+    assert_eq!(source.get_untracked(), "ab\ncd");
+    // Setting it to None takes it away.
+    ghost.set(None);
+    ui.update();
+    assert_eq!(rows()[0].0, "ab");
+    // Typing keeps the text right, and the ghost goes after the new caret.
+    typ(&mut ui, "c");
+    assert_eq!(source.get_untracked(), "acb\ncd");
+    ghost.set(Some("XY".to_owned()));
+    ui.update();
+    assert_eq!(rows()[0].0, "acXYb");
+    // A selection hides it.
+    key(
+        &mut ui,
+        Key::Named(NamedKey::ArrowRight),
+        None,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    assert_eq!(selection(), (2, 3));
+    assert_eq!(rows()[0].0, "acb");
+}
+
+#[test]
+fn the_ghost_goes_from_a_line_when_the_caret_leaves_it() {
+    let source = signal("ab\ncd".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let mut ui = mount(move || editor(source).ghost_text(ghost));
+    click(&mut ui, PointF::new(1.0, 10.0), 0);
+    named(&mut ui, NamedKey::ArrowRight);
+    assert_eq!(rows()[0].0, "aXYb");
+    // The caret goes to the next line: the ghost goes from the first, and shows on the second.
+    named(&mut ui, NamedKey::ArrowDown);
+    assert_eq!(rows()[0].0, "ab");
+    assert_eq!(rows()[1].0, "cXYd");
+    // The marks of the line stay as they were, and the ghost going takes its letters away.
+    ghost.set(None);
+    ui.update();
+    assert_eq!(rows()[0].0, "ab");
+    assert_eq!(rows()[1].0, "cd");
+    assert_eq!(source.get_untracked(), "ab\ncd");
+}
+
+#[test]
+fn the_ghost_shows_only_while_the_editor_is_focused() {
+    let source = signal("ab".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let other = node_ref();
+    let mut ui = mount(move || {
+        div()
+            .child(editor(source).ghost_text(ghost))
+            .child(div().node_ref(other).focusable().h(10.0))
+    });
+    click(&mut ui, PointF::new(1.0, 10.0), 0);
+    named(&mut ui, NamedKey::ArrowRight);
+    assert_eq!(rows()[0].0, "aXYb");
+    // The focus goes elsewhere: the ghost goes, but the signal keeps it.
+    other.focus();
+    ui.update();
+    assert_eq!(rows()[0].0, "ab");
+    assert_eq!(ghost.get_untracked(), Some("XY".to_owned()));
+    // Coming back to the editor shows it again, at the caret the click puts there.
+    click(&mut ui, PointF::new(1.0, 10.0), 1000);
+    assert_eq!(rows()[0].0, "XYab");
+}
+
+#[test]
 fn some_lines_can_show_as_one_node() {
     let source = signal("a\nb\nc\nd".to_owned());
     let _ui = mount(move || {

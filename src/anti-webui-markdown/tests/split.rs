@@ -535,3 +535,24 @@ fn time_scrolling_after_a_link() {
     eprintln!("the source scrolled: {}", frames(&mut ui, 40, 700.0));
     eprintln!("editor at line {:?}", editor.top_line());
 }
+
+#[test]
+fn the_ghost_shows_in_the_source_at_the_caret() {
+    let source = signal("ab\ncd".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let editor = editor_ref();
+    let mut ui = mount(move || {
+        markdown_split_editor(source)
+            .ghost_text(ghost)
+            .editor_ref(editor)
+            .w(1000.0)
+            .h(600.0)
+    });
+    editor.select(1, 1);
+    ui.update();
+    assert!(has_text("aXYb"));
+    assert_eq!(source.get_untracked(), "ab\ncd");
+    ghost.set(None);
+    ui.update();
+    assert!(!has_text("aXYb"));
+}

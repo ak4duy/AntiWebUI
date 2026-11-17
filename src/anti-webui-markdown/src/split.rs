@@ -17,6 +17,7 @@ const NARROWEST: f32 = 0.15;
 /// A Markdown editor with the source on the left and what it shows on the right.
 pub struct MarkdownSplitEditor {
     source: Signal<String>,
+    ghost: Option<Signal<Option<String>>>,
     theme: MarkdownTheme,
     code_theme: CodeTheme,
     on_link: OnLink,
@@ -35,6 +36,7 @@ pub struct MarkdownSplitEditor {
 pub fn markdown_split_editor(source: Signal<String>) -> MarkdownSplitEditor {
     MarkdownSplitEditor {
         source,
+        ghost: None,
         theme: MarkdownTheme::default(),
         code_theme: CodeTheme::light(),
         on_link: None,
@@ -51,6 +53,14 @@ pub fn markdown_split_editor(source: Signal<String>) -> MarkdownSplitEditor {
 }
 
 impl MarkdownSplitEditor {
+    /// Text shown after the caret on the source side, dimmed, as a suggestion of what to type. It
+    /// is not part of the text, and it is shown while the editor is focused. It is hidden while
+    /// there is a selection or an IME pre-edit.
+    pub fn ghost_text(mut self, text: Signal<Option<String>>) -> Self {
+        self.ghost = Some(text);
+        self
+    }
+
     /// How the right side looks.
     pub fn theme(mut self, theme: MarkdownTheme) -> Self {
         self.theme = theme;
@@ -344,6 +354,41 @@ impl IntoView for MarkdownSplitEditor {
             let (l1, l2, l3) = (lead(Side::Source), lead(Side::Source), lead(Side::Source));
             let follow = follow_source.clone();
             let show = show_caret.clone();
+            let mut source_editor = code_editor(String::new())
+                .value(source)
+                .language(Language::Markdown)
+                .theme(self.code_theme.clone())
+                .wrap(true)
+                .line_numbers(self.line_numbers)
+                .editor_ref(editor)
+                .on_scrolled(move |_| follow())
+                .on_select(move |_, _| {
+                    // Now for a move, and once the right side is laid out again for an edit.
+                    show();
+                    let show = show.clone();
+                    request_frame(move |_| {
+                        if mark.is_alive() {
+                            show();
+                        }
+                    });
+                })
+                .on_key_down(move |e| {
+                    if let Some(f) = &on_key_down {
+                        f(e);
+                        if e.is_default_prevented() {
+                            return;
+                        }
+                    }
+                    l3();
+                    if lists {
+                        list_keys(editor, e);
+                    }
+                })
+                .flex_1()
+                .min_h(0.0);
+            if let Some(ghost) = self.ghost {
+                source_editor = source_editor.ghost_text(ghost);
+            }
             div()
                 .h_full()
                 .min_w(0.0)
@@ -353,41 +398,7 @@ impl IntoView for MarkdownSplitEditor {
                 .dyn_style(move |s| s.w(pct(split.get() * 100.0)))
                 .on_pointer_down(move |_| l1())
                 .on_scroll(move |_| l2())
-                .child(
-                    code_editor(String::new())
-                        .value(source)
-                        .language(Language::Markdown)
-                        .theme(self.code_theme.clone())
-                        .wrap(true)
-                        .line_numbers(self.line_numbers)
-                        .editor_ref(editor)
-                        .on_scrolled(move |_| follow())
-                        .on_select(move |_, _| {
-                            // Now for a move, and once the right side is laid out again for an
-                            // edit.
-                            show();
-                            let show = show.clone();
-                            request_frame(move |_| {
-                                if mark.is_alive() {
-                                    show();
-                                }
-                            });
-                        })
-                        .on_key_down(move |e| {
-                            if let Some(f) = &on_key_down {
-                                f(e);
-                                if e.is_default_prevented() {
-                                    return;
-                                }
-                            }
-                            l3();
-                            if lists {
-                                list_keys(editor, e);
-                            }
-                        })
-                        .flex_1()
-                        .min_h(0.0),
-                )
+                .child(source_editor)
         };
 
         let line = self.code_theme.bracket_background;

@@ -454,6 +454,20 @@ fn wiki_links_are_off_by_default() {
 }
 
 #[test]
+fn the_ghost_shows_in_the_caret_row() {
+    let source = signal("ab\ncd".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let mut ui = mount(move || editor(source).ghost_text(ghost));
+    select(1);
+    ui.update();
+    assert_eq!(shown()[0], "aXYb");
+    assert_eq!(source.get_untracked(), "ab\ncd");
+    ghost.set(None);
+    ui.update();
+    assert_eq!(shown()[0], "ab");
+}
+
+#[test]
 fn down_goes_down_from_inside_code() {
     let doc = "some `code` here\nthe next line\nand the last";
     let source = signal(doc.to_owned());

@@ -39,6 +39,7 @@ type BracketsAt = (u64, usize, Option<(usize, usize)>);
 pub struct CodeEditor {
     text: String,
     value: Option<Signal<String>>,
+    ghost: Option<Signal<Option<String>>>,
     language: Language,
     theme: CodeTheme,
     style: Style,
@@ -58,6 +59,7 @@ pub fn code_editor(text: impl Into<String>) -> CodeEditor {
     CodeEditor {
         text: text.into(),
         value: None,
+        ghost: None,
         language: Language::PlainText,
         theme: CodeTheme::default(),
         style: Style::default(),
@@ -100,6 +102,14 @@ impl CodeEditor {
     /// a copy of the whole text at every change.
     pub fn value(mut self, value: Signal<String>) -> Self {
         self.value = Some(value);
+        self
+    }
+
+    /// Text shown after the caret, dimmed, as a suggestion of what to type. It is not part of the
+    /// text, and it is shown while the editor is focused. It is hidden while there is a selection
+    /// or an IME pre-edit.
+    pub fn ghost_text(mut self, text: Signal<Option<String>>) -> Self {
+        self.ghost = Some(text);
         self
     }
 
@@ -1013,6 +1023,9 @@ impl IntoView for CodeEditor {
             });
         if let Some(v) = self.value {
             te = te.value(v);
+        }
+        if let Some(g) = self.ghost {
+            te = te.ghost_text(g);
         }
         if let Some(f) = self.on_scrolled {
             te = te.on_scrolled(move |p| f(p));

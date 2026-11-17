@@ -2335,6 +2335,7 @@ pub struct TextEditor {
     cfg: ElementConfig,
     text: Option<String>,
     value: Option<Signal<String>>,
+    ghost: Option<Signal<Option<String>>>,
     on_change: Option<TextCallback>,
     decorate: Option<Rc<crate::text::editor::Decorate>>,
     decorate_lines: Option<Rc<crate::text::editor::DecorateLines>>,
@@ -2351,6 +2352,7 @@ pub fn text_editor() -> TextEditor {
         cfg: ElementConfig::default(),
         text: None,
         value: None,
+        ghost: None,
         on_change: None,
         decorate: None,
         decorate_lines: None,
@@ -2383,6 +2385,14 @@ impl TextEditor {
     /// Two-way binds the text to a signal.
     pub fn value(mut self, value: Signal<String>) -> Self {
         self.value = Some(value);
+        self
+    }
+
+    /// Text shown after the caret, dimmed, as a suggestion of what to type. It is not part of the
+    /// text, and it is shown while the editor is focused. It is hidden while there is a selection
+    /// or an IME pre-edit.
+    pub fn ghost_text(mut self, text: Signal<Option<String>>) -> Self {
+        self.ghost = Some(text);
         self
     }
 
@@ -2472,6 +2482,7 @@ impl IntoView for TextEditor {
             data.clear_history();
         }
         data.value = self.value;
+        data.ghost = self.ghost.and_then(|g| g.get_untracked());
         data.on_change = self.on_change;
         data.decorate = self.decorate;
         data.decorate_lines = self.decorate_lines;
@@ -2501,6 +2512,22 @@ impl IntoView for TextEditor {
                     && out.changed
                 {
                     crate::text::editor::after_edit(id, out);
+                }
+            });
+        }
+        if let Some(ghost) = self.ghost {
+            effect(move || {
+                let g = ghost.get();
+                let changed = with_doc(|d| {
+                    let Some(e) = d.get_mut(id).and_then(Node::editor_mut) else {
+                        return false;
+                    };
+                    let changed = e.ghost != g;
+                    e.ghost = g;
+                    changed
+                });
+                if changed {
+                    crate::text::editor::sync(id);
                 }
             });
         }
