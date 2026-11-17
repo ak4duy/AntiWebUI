@@ -91,6 +91,19 @@ fn rows() -> Vec<(String, Option<NodeId>)> {
     })
 }
 
+/// The color of the first span of the first row's text: the ghost's, when it shows.
+fn ghost_color() -> Option<Color> {
+    with_doc(|d| {
+        let h = d.editors[0];
+        let div = *d.nodes[h].children.first()?;
+        let text = *d.nodes[div].children.first()?;
+        let NodeKind::Text(t) = &d.nodes[text].kind else {
+            return None;
+        };
+        t.rich.as_ref()?.spans.first()?.style.color
+    })
+}
+
 fn selection() -> (usize, usize) {
     let h = host();
     with_doc(|d| {
@@ -295,6 +308,27 @@ fn the_ghost_shows_after_the_caret_and_is_not_in_the_text() {
     );
     assert_eq!(selection(), (2, 3));
     assert_eq!(rows()[0].0, "acb");
+}
+
+#[test]
+fn the_ghost_takes_the_color_of_the_text_when_it_changes() {
+    let source = signal("ab".to_owned());
+    let ghost = signal(Some("XY".to_owned()));
+    let color = signal(rgb(0x112233));
+    let mut ui = mount(move || {
+        editor(source)
+            .ghost_text(ghost)
+            .dyn_style(move |s| s.text_color(color.get()))
+    });
+    click(&mut ui, PointF::new(1.0, 10.0), 0);
+    named(&mut ui, NamedKey::ArrowRight);
+    assert_eq!(rows()[0].0, "aXYb");
+    assert_eq!(ghost_color(), Some(rgb(0x112233).with_alpha(0.45)));
+    // The color changes under it: the ghost is shown again in the new color.
+    color.set(rgb(0x445566));
+    ui.update();
+    assert_eq!(rows()[0].0, "aXYb");
+    assert_eq!(ghost_color(), Some(rgb(0x445566).with_alpha(0.45)));
 }
 
 #[test]

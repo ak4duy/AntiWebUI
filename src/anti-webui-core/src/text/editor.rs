@@ -243,14 +243,18 @@ pub(crate) struct RowSlot {
     owner: Option<Owner>,
     /// The ghost text it shows, and the byte of the line it is shown at.
     ghost: Option<(usize, String)>,
+    /// The color its ghost is dimmed from.
+    ghost_color: Option<Color>,
 }
 
 impl RowSlot {
-    /// Whether it shows the same ghost text at the same byte.
-    fn same_ghost(&self, ghost: Option<(usize, &str)>) -> bool {
+    /// Whether it shows the same ghost text at the same byte, in the same color.
+    fn same_ghost(&self, ghost: Option<(usize, &str)>, color: Color) -> bool {
         match (&self.ghost, ghost) {
             (None, None) => true,
-            (Some((at, g)), Some((now_at, now))) => *at == now_at && g.as_str() == now,
+            (Some((at, g)), Some((now_at, now))) => {
+                *at == now_at && g.as_str() == now && self.ghost_color == Some(color)
+            }
             _ => false,
         }
     }
@@ -273,6 +277,8 @@ struct ShownKey {
     focused: bool,
     preedit: Option<Preedit>,
     ghost: Option<String>,
+    /// The color the ghost is dimmed from, when there is one.
+    ghost_color: Option<Color>,
     looks: u64,
 }
 
@@ -1625,6 +1631,7 @@ fn build_row(
         gutter,
         owner: None,
         ghost: ghost.map(|(at, g)| (at, g.to_owned())),
+        ghost_color: ghost.map(|_| color),
     }
 }
 
@@ -1656,7 +1663,7 @@ fn refill(
     // letters, so a row that showed one, or shows another now, is shown again.
     let same_letters = !text_changed
         && preedit.is_none()
-        && slot.same_ghost(ghost)
+        && slot.same_ghost(ghost, color)
         && old.marks == look.marks
         && old.replace == look.replace
         && old.raised == look.raised;
@@ -1814,6 +1821,7 @@ pub(crate) fn sync(host: NodeId) {
             focused,
             preedit: e.preedit.clone(),
             ghost: e.ghost.clone(),
+            ghost_color: e.ghost.as_ref().map(|_| color),
             looks: e.looks_version,
         };
         let changed = e.shown_key.as_ref() != Some(&key);
@@ -2088,7 +2096,7 @@ pub(crate) fn sync(host: NodeId) {
         let pre = old_preedit.is_some_and(|l| (row_lines(&structure, row)).contains(&l))
             || preedit_at(row).is_some();
         let ghost_now = ghost_at(row, &looks[k]);
-        let ghost_changed = !s.same_ghost(ghost_now);
+        let ghost_changed = !s.same_ghost(ghost_now, color);
         let can_refill = matches!((&s.look, &looks[k]), (Row::Line(_), Row::Line(_)))
             && !s.look.has_widgets()
             && !looks[k].has_widgets();
@@ -2243,6 +2251,7 @@ pub(crate) fn sync(host: NodeId) {
             );
             next[k].look = looks[k].clone();
             next[k].ghost = ghost.map(|(at, g)| (at, g.to_owned()));
+            next[k].ghost_color = ghost.map(|_| color);
         }
         for (k, slot) in next.iter_mut().enumerate() {
             if let (Some(g), Some(look)) = (&mut slot.gutter, gutter_look(wanted[k])) {
@@ -2335,6 +2344,9 @@ fn measure(d: &mut Document, host: NodeId) -> (bool, bool) {
     if e.rows.is_empty() {
         return (false, false);
     }
+    // The ghost is painted in the color of the text around it, which the rows don't otherwise
+    // see.
+    let ghost_color = e.ghost.as_ref().map(|_| h.computed.color);
 
     // What the rows measured.
     let mut measured = Vec::new();
@@ -2402,7 +2414,10 @@ fn measure(d: &mut Document, host: NodeId) -> (bool, bool) {
         .and_then(Node::editor_mut)
         .expect("looked at above");
     let mut relaid = false;
-    let mut resync = false;
+    let mut resync = e
+        .shown_key
+        .as_ref()
+        .is_some_and(|k| k.ghost_color != ghost_color);
     {
         let s = &e.structure;
         let hs = &mut e.heights;
