@@ -554,12 +554,101 @@ struct Entry {
     runs: Vec<Run>,
     /// Bytes it has in the store.
     bytes: u32,
+    /// Where those bytes start in the store.
+    base: u32,
     /// The last frame that drew it.
     frame: u64,
 }
 
 /// A row of the table for what is drawn in a frame.
 pub type TableRow = [f32; 4];
+
+/// Packs the entries still in use into a smaller store. `None` means what was drawn this frame
+/// alone doesn't fit, so everything has to be made again.
+fn compact_entries(
+    entries: HashMap<Key, Entry>,
+    store: &[u8],
+    frame: u64,
+    capacity: u64,
+) -> Option<(HashMap<Key, Entry>, Vec<u8>, u64)> {
+    let mut current = Vec::new();
+    let mut previous = Vec::new();
+    let mut live = 0u64;
+    for (key, entry) in entries {
+        if entry.frame == frame {
+            live += entry.bytes as u64;
+            current.push((key, entry));
+        } else if entry.frame + 1 == frame {
+            previous.push((key, entry));
+        }
+    }
+    if live > capacity {
+        return None;
+    }
+    let mut kept = current;
+    let mut total = live;
+    for (key, entry) in previous {
+        if total + entry.bytes as u64 <= capacity {
+            total += entry.bytes as u64;
+            kept.push((key, entry));
+        }
+    }
+    let mut packed = HashMap::with_capacity(kept.len());
+    let mut cpu = Vec::with_capacity(total as usize);
+    for (key, mut entry) in kept {
+        let Some(bytes) = store.get(entry.base as usize..(entry.base + entry.bytes) as usize)
+        else {
+            continue;
+        };
+        let base = cpu.len() as u32;
+        cpu.extend_from_slice(bytes);
+        for run in &mut entry.runs {
+            if run.alpha & SOLID == 0 {
+                run.alpha = run.alpha - entry.base + base;
+            }
+        }
+        entry.base = base;
+        packed.insert(key, entry);
+    }
+    Some((packed, cpu, live))
+}
+
+fn collect_jobs_into<'a>(
+    entries: &HashMap<Key, Entry>,
+    primitives: &'a [Primitive],
+    jobs: &mut Vec<Job<'a>>,
+    seen: &mut std::collections::HashSet<Key>,
+) {
+    for p in primitives {
+        match p {
+            Primitive::Path(d) => {
+                let m = d.transform;
+                let (ox, oy) = (m.e.floor(), m.f.floor());
+                let local = kurbo::Affine::new([m.a, m.b, m.c, m.d, m.e - ox, m.f - oy]);
+                if d.bounds.width as f64 > WHOLE_LIMIT || d.bounds.height as f64 > WHOLE_LIMIT {
+                    continue;
+                }
+                let (quads, cut) = local_quads(d, 1, 0, 0, ox, oy);
+                let key = Key {
+                    geometry: d.geometry.id(),
+                    rule: d.rule,
+                    matrix: local.as_coeffs().map(|v| (v as f32).to_bits()),
+                    stroke: d.stroke.as_deref().map_or(0, stroke_key),
+                    cut,
+                    region: None,
+                };
+                if !entries.contains_key(&key) && seen.insert(key) {
+                    let area = d.bounds.translate(-ox as i32, -oy as i32).outset(2);
+                    jobs.push((key, d, local, area, quads));
+                }
+            }
+            // Layer content is drawn at the layer's k and placement, which `push` knows and
+            // this pass doesn't. Preparing it here makes keys `push` never asks for.
+            Primitive::Layer(_) => {}
+            _ => {}
+        }
+    }
+}
 
 fn stroke_key(stroke: &StrokeStyle) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -667,6 +756,8 @@ pub struct PathPass {
     /// Where compiled shaders are kept for the next launch.
     shader_cache: Option<std::sync::Arc<crate::shader_cache::ShaderCache>>,
     entries: HashMap<Key, Entry>,
+    /// What the store holds, so that live entries can be packed again when it fills.
+    store_cpu: Vec<u8>,
     /// How much of the store is taken.
     used: u32,
     /// What isn't in the store yet, starting at this index.
@@ -703,6 +794,7 @@ impl PathPass {
             pipeline: None,
             shader_cache: None,
             entries: HashMap::new(),
+            store_cpu: Vec::new(),
             used: 0,
             pending: Vec::new(),
             pending_at: 0,
@@ -802,10 +894,23 @@ impl PathPass {
             }
             self.limit = (self.limit * 2).min(self.max_rows);
         }
-        self.entries.clear();
-        self.used = 0;
-        self.pending.clear();
-        self.pending_at = 0;
+        let entries = std::mem::take(&mut self.entries);
+        if let Some((entries, cpu, live)) =
+            compact_entries(entries, &self.store_cpu, self.frame, self.capacity())
+        {
+            self.entries = entries;
+            self.used = cpu.len() as u32;
+            self.store_cpu = cpu;
+            self.live = live;
+            self.pending = self.store_cpu.clone();
+            self.pending_at = 0;
+        } else {
+            self.store_cpu.clear();
+            self.used = 0;
+            self.live = 0;
+            self.pending.clear();
+            self.pending_at = 0;
+        }
         true
     }
 
@@ -922,6 +1027,7 @@ impl PathPass {
         if self.pending.is_empty() {
             self.pending_at = base;
         }
+        self.store_cpu.extend_from_slice(&strips.alpha);
         self.pending.extend_from_slice(&strips.alpha);
         let bytes = strips.alpha.len() as u32;
         let mut runs = strips.runs;
@@ -935,6 +1041,7 @@ impl PathPass {
             Entry {
                 runs,
                 bytes,
+                base,
                 frame: 0,
             },
         );
@@ -994,35 +1101,7 @@ impl PathPass {
         jobs: &mut Vec<Job<'a>>,
         seen: &mut std::collections::HashSet<Key>,
     ) {
-        for p in primitives {
-            match p {
-                Primitive::Path(d) => {
-                    let m = d.transform;
-                    let (ox, oy) = (m.e.floor(), m.f.floor());
-                    let local = kurbo::Affine::new([m.a, m.b, m.c, m.d, m.e - ox, m.f - oy]);
-                    if d.bounds.width as f64 > WHOLE_LIMIT || d.bounds.height as f64 > WHOLE_LIMIT {
-                        continue;
-                    }
-                    let (quads, cut) = local_quads(d, 1, 0, 0, ox, oy);
-                    let key = Key {
-                        geometry: d.geometry.id(),
-                        rule: d.rule,
-                        matrix: local.as_coeffs().map(|v| (v as f32).to_bits()),
-                        stroke: d.stroke.as_deref().map_or(0, stroke_key),
-                        cut,
-                        region: None,
-                    };
-                    if !self.entries.contains_key(&key) && seen.insert(key) {
-                        let area = d.bounds.translate(-ox as i32, -oy as i32).outset(2);
-                        jobs.push((key, d, local, area, quads));
-                    }
-                }
-                Primitive::Layer(layer) => {
-                    self.collect_jobs(&layer.content.primitives, jobs, seen);
-                }
-                _ => {}
-            }
-        }
+        collect_jobs_into(&self.entries, primitives, jobs, seen);
     }
 
     /// Hands to the GPU what this frame added. Call before anything is drawn.
@@ -1514,5 +1593,102 @@ mod tests {
         let path = kurbo::Circle::new((12.0, 12.0), 10.0).into_path(0.1);
         let s = made(&path, FillRule::NonZero);
         assert!(s.runs.len() <= 3, "{:?}", s.runs.len());
+    }
+
+    fn store_key(geometry: u64) -> Key {
+        Key {
+            geometry,
+            rule: FillRule::NonZero,
+            matrix: [0; 6],
+            stroke: 0,
+            cut: 0,
+            region: None,
+        }
+    }
+
+    fn store_entry(base: u32, bytes: u32, frame: u64, alpha: u32) -> Entry {
+        Entry {
+            runs: vec![Run {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+                alpha,
+            }],
+            bytes,
+            base,
+            frame,
+        }
+    }
+
+    fn test_draw() -> PathDraw {
+        use anti_webui_core::scene::{Clip, PathPaint};
+        use anti_webui_core::style::Color;
+        PathDraw {
+            geometry: PathGeometry::new(rect(0.0, 0.0, 10.0, 10.0)),
+            stroke: None,
+            rule: FillRule::NonZero,
+            paint: PathPaint::Color(Color::BLACK),
+            opacity: 1.0,
+            transform: Affine::IDENTITY,
+            bounds: RectI::new(0, 0, 10, 10),
+            clip: Clip::NONE,
+            quads: None,
+        }
+    }
+
+    #[test]
+    fn layer_content_is_left_for_push() {
+        use anti_webui_core::geometry::PointI;
+        use anti_webui_core::scene::{Clip, Layer, Scene};
+        use std::sync::Arc;
+        let window = test_draw();
+        let layer = Primitive::Layer(Layer {
+            key: 1,
+            clip: Clip::NONE,
+            origin: PointI::default(),
+            transform: Affine::IDENTITY,
+            bounds: RectI::new(0, 0, 10, 10),
+            opacity: 1.0,
+            content: Arc::new(Scene {
+                primitives: vec![Primitive::Path(test_draw())],
+                ..Scene::default()
+            }),
+            filter: None,
+        });
+        let mut jobs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let primitives = [Primitive::Path(window), layer];
+        collect_jobs_into(&HashMap::new(), &primitives, &mut jobs, &mut seen);
+        assert_eq!(jobs.len(), 1);
+    }
+
+    #[test]
+    fn a_full_store_keeps_live_entries_and_drops_dead_ones() {
+        let a = store_key(1);
+        let b = store_key(2);
+        let c = store_key(3);
+        let mut entries = HashMap::new();
+        entries.insert(a, store_entry(0, 3, 10, 0));
+        entries.insert(b, store_entry(3, 2, 9, 3));
+        entries.insert(c, store_entry(5, 4, 3, 5));
+        let store = [10, 11, 12, 20, 21, 30, 31, 32, 33];
+        let (entries, cpu, live) = compact_entries(entries, &store, 10, 100).expect("fits");
+        assert_eq!(cpu, [10, 11, 12, 20, 21]);
+        assert_eq!(live, 3);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[&a].base, 0);
+        assert_eq!(entries[&a].runs[0].alpha, 0);
+        assert_eq!(entries[&b].base, 3);
+        assert_eq!(entries[&b].runs[0].alpha, 3);
+        assert!(!entries.contains_key(&c));
+    }
+
+    #[test]
+    fn a_full_store_falls_back_when_this_frame_alone_does_not_fit() {
+        let mut entries = HashMap::new();
+        entries.insert(store_key(1), store_entry(0, 6, 10, 0));
+        let store = [0; 6];
+        assert!(compact_entries(entries, &store, 10, 5).is_none());
     }
 }
