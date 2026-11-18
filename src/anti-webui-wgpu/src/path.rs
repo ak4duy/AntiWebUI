@@ -613,6 +613,45 @@ fn compact_entries(
     Some((packed, cpu, live))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FullStep {
+    /// Keep what the frame drew and what the frame before it drew.
+    Compact,
+    /// Start over from an empty store once, without growing it.
+    EmptyRetry,
+    /// An empty store filled again: make it bigger, or give up if it cannot be.
+    Grow,
+}
+
+#[derive(Default)]
+struct FullReset {
+    empty_retry: bool,
+}
+
+impl FullReset {
+    fn begin_frame(&mut self) {
+        self.empty_retry = false;
+    }
+
+    fn step(&mut self, cleared: bool) -> FullStep {
+        if !cleared {
+            FullStep::Compact
+        } else if !self.empty_retry {
+            self.empty_retry = true;
+            FullStep::EmptyRetry
+        } else {
+            FullStep::Grow
+        }
+    }
+}
+
+fn grow_limit(limit: &mut u32, max_rows: u32, gave_up: &mut bool) {
+    if *limit >= max_rows {
+        *gave_up = true;
+    }
+    *limit = (*limit * 2).min(max_rows);
+}
+
 fn collect_jobs_into<'a>(
     entries: &HashMap<Key, Entry>,
     primitives: &'a [Primitive],
@@ -772,6 +811,7 @@ pub struct PathPass {
     limit: u32,
     /// What a frame needs doesn't fit whatever the store is like: the rest isn't shown.
     gave_up: bool,
+    full_reset: FullReset,
     frame: u64,
     /// What this frame draws takes this many bytes of the store.
     live: u64,
@@ -804,6 +844,7 @@ impl PathPass {
             full: false,
             limit: STORE_MAX_ROWS.min(max_texture),
             gave_up: false,
+            full_reset: FullReset::default(),
             frame: 0,
             live: 0,
         }
@@ -881,43 +922,56 @@ impl PathPass {
         }
     }
 
-    /// Starts over with an empty store, after it got full. `cleared`: it already did for this frame,
-    /// so that the frame needs more than there was room for.
+    /// Handles the store filling. The first fill in a frame packs what is still live; a repeat
+    /// fill starts that frame over from an empty store; only an empty store filling again makes
+    /// it bigger. `cleared`: a fill was already handled for this frame.
     pub fn take_full(&mut self, cleared: bool) -> bool {
         if !std::mem::take(&mut self.full) {
             return false;
         }
-        if cleared {
-            if self.limit >= self.max_rows {
-                log::warn!("too many shapes for what the GPU can hold");
-                self.gave_up = true;
+        match self.full_reset.step(cleared) {
+            FullStep::Compact => {
+                let entries = std::mem::take(&mut self.entries);
+                if let Some((entries, cpu, live)) =
+                    compact_entries(entries, &self.store_cpu, self.frame, self.capacity())
+                {
+                    self.entries = entries;
+                    self.used = cpu.len() as u32;
+                    self.store_cpu = cpu;
+                    self.live = live;
+                    self.pending = self.store_cpu.clone();
+                    self.pending_at = 0;
+                } else {
+                    self.clear_store();
+                }
             }
-            self.limit = (self.limit * 2).min(self.max_rows);
-        }
-        let entries = std::mem::take(&mut self.entries);
-        if let Some((entries, cpu, live)) =
-            compact_entries(entries, &self.store_cpu, self.frame, self.capacity())
-        {
-            self.entries = entries;
-            self.used = cpu.len() as u32;
-            self.store_cpu = cpu;
-            self.live = live;
-            self.pending = self.store_cpu.clone();
-            self.pending_at = 0;
-        } else {
-            self.store_cpu.clear();
-            self.used = 0;
-            self.live = 0;
-            self.pending.clear();
-            self.pending_at = 0;
+            FullStep::EmptyRetry => self.clear_store(),
+            FullStep::Grow => {
+                grow_limit(&mut self.limit, self.max_rows, &mut self.gave_up);
+                if self.gave_up {
+                    log::warn!("too many shapes for what the GPU can hold");
+                }
+                self.clear_store();
+            }
         }
         true
+    }
+
+    fn clear_store(&mut self) {
+        self.entries.clear();
+        self.store_cpu.clear();
+        self.used = 0;
+        self.live = 0;
+        self.pending.clear();
+        self.pending_at = 0;
     }
 
     /// Call once per frame, before anything is added.
     pub fn begin_frame(&mut self) {
         self.frame += 1;
         self.live = 0;
+        self.gave_up = false;
+        self.full_reset.begin_frame();
     }
 
     fn capacity(&self) -> u64 {
@@ -1667,12 +1721,13 @@ mod tests {
     fn a_full_store_keeps_live_entries_and_drops_dead_ones() {
         let a = store_key(1);
         let b = store_key(2);
-        let c = store_key(3);
+        let dead = store_key(0);
         let mut entries = HashMap::new();
-        entries.insert(a, store_entry(0, 3, 10, 0));
-        entries.insert(b, store_entry(3, 2, 9, 3));
-        entries.insert(c, store_entry(5, 4, 3, 5));
-        let store = [10, 11, 12, 20, 21, 30, 31, 32, 33];
+        // A dead entry before the live ones makes both bases and run offsets move.
+        entries.insert(dead, store_entry(0, 3, 3, 0));
+        entries.insert(a, store_entry(3, 3, 10, 3));
+        entries.insert(b, store_entry(6, 2, 9, 6));
+        let store = [90, 91, 92, 10, 11, 12, 20, 21];
         let (entries, cpu, live) = compact_entries(entries, &store, 10, 100).expect("fits");
         assert_eq!(cpu, [10, 11, 12, 20, 21]);
         assert_eq!(live, 3);
@@ -1681,14 +1736,30 @@ mod tests {
         assert_eq!(entries[&a].runs[0].alpha, 0);
         assert_eq!(entries[&b].base, 3);
         assert_eq!(entries[&b].runs[0].alpha, 3);
-        assert!(!entries.contains_key(&c));
+        assert!(!entries.contains_key(&dead));
     }
 
     #[test]
-    fn a_full_store_falls_back_when_this_frame_alone_does_not_fit() {
-        let mut entries = HashMap::new();
-        entries.insert(store_key(1), store_entry(0, 6, 10, 0));
-        let store = [0; 6];
-        assert!(compact_entries(entries, &store, 10, 5).is_none());
+    fn a_full_store_tries_an_empty_store_before_growing() {
+        let mut reset = FullReset::default();
+        assert_eq!(reset.step(false), FullStep::Compact);
+        assert_eq!(reset.step(true), FullStep::EmptyRetry);
+        assert_eq!(reset.step(true), FullStep::Grow);
+        reset.begin_frame();
+        assert_eq!(reset.step(false), FullStep::Compact);
+
+        let mut limit = 8;
+        let mut gave_up = false;
+        assert_eq!(reset.step(false), FullStep::Compact);
+        assert_eq!(reset.step(true), FullStep::EmptyRetry);
+        assert_eq!(limit, 8);
+        assert!(!gave_up, "an empty retry must not grow or give up");
+        assert_eq!(reset.step(true), FullStep::Grow);
+        grow_limit(&mut limit, 16, &mut gave_up);
+        assert_eq!(limit, 16);
+        assert!(!gave_up);
+        grow_limit(&mut limit, 16, &mut gave_up);
+        assert_eq!(limit, 16);
+        assert!(gave_up, "only a full store at the maximum gives up");
     }
 }
