@@ -570,6 +570,7 @@ fn compact_entries(
     store: &[u8],
     frame: u64,
     capacity: u64,
+    keep_previous: bool,
 ) -> Option<(HashMap<Key, Entry>, Vec<u8>, u64)> {
     let mut current = Vec::new();
     let mut previous = Vec::new();
@@ -578,7 +579,7 @@ fn compact_entries(
         if entry.frame == frame {
             live += entry.bytes as u64;
             current.push((key, entry));
-        } else if entry.frame + 1 == frame {
+        } else if keep_previous && entry.frame + 1 == frame {
             previous.push((key, entry));
         }
     }
@@ -617,32 +618,47 @@ fn compact_entries(
 enum FullStep {
     /// Keep what the frame drew and what the frame before it drew.
     Compact,
-    /// Start over from an empty store once, without growing it.
-    EmptyRetry,
-    /// An empty store filled again: make it bigger, or give up if it cannot be.
+    /// Keep what the frame drew alone.
+    CompactCurrent,
+    /// Keep what the frame drew in a bigger store, or give up if it cannot be.
     Grow,
 }
 
 #[derive(Default)]
 struct FullReset {
-    empty_retry: bool,
+    fills: u32,
 }
 
 impl FullReset {
     fn begin_frame(&mut self) {
-        self.empty_retry = false;
+        self.fills = 0;
     }
 
-    fn step(&mut self, cleared: bool) -> FullStep {
-        if !cleared {
-            FullStep::Compact
-        } else if !self.empty_retry {
-            self.empty_retry = true;
-            FullStep::EmptyRetry
-        } else {
-            FullStep::Grow
+    fn step(&mut self) -> FullStep {
+        self.fills += 1;
+        match self.fills {
+            1 => FullStep::Compact,
+            2 => FullStep::CompactCurrent,
+            _ => FullStep::Grow,
         }
     }
+}
+
+/// Splits a matrix into the whole pixels of its translation and what is left of it, which is
+/// rounded to sixteenths of a pixel so shapes that drift a little share what is made for them.
+fn split_translation(m: &Affine) -> (f64, f64, kurbo::Affine) {
+    let (mut ox, mut oy) = (m.e.floor(), m.f.floor());
+    let mut fx = ((m.e - ox) * 16.0).round() / 16.0;
+    let mut fy = ((m.f - oy) * 16.0).round() / 16.0;
+    if fx >= 1.0 {
+        ox += 1.0;
+        fx = 0.0;
+    }
+    if fy >= 1.0 {
+        oy += 1.0;
+        fy = 0.0;
+    }
+    (ox, oy, kurbo::Affine::new([m.a, m.b, m.c, m.d, fx, fy]))
 }
 
 fn grow_limit(limit: &mut u32, max_rows: u32, gave_up: &mut bool) {
@@ -662,8 +678,7 @@ fn collect_jobs_into<'a>(
         match p {
             Primitive::Path(d) => {
                 let m = d.transform;
-                let (ox, oy) = (m.e.floor(), m.f.floor());
-                let local = kurbo::Affine::new([m.a, m.b, m.c, m.d, m.e - ox, m.f - oy]);
+                let (ox, oy, local) = split_translation(&m);
                 if d.bounds.width as f64 > WHOLE_LIMIT || d.bounds.height as f64 > WHOLE_LIMIT {
                     continue;
                 }
@@ -922,37 +937,39 @@ impl PathPass {
         }
     }
 
-    /// Handles the store filling. The first fill in a frame packs what is still live; a repeat
-    /// fill starts that frame over from an empty store; only an empty store filling again makes
-    /// it bigger. `cleared`: a fill was already handled for this frame.
-    pub fn take_full(&mut self, cleared: bool) -> bool {
+    /// Handles the store filling, never dropping what this frame drew. The first fill in a frame
+    /// packs this frame's and the previous frame's entries; a second packs this frame's alone; any
+    /// more make the store bigger, and only a store at its biggest gives up.
+    pub fn take_full(&mut self) -> bool {
         if !std::mem::take(&mut self.full) {
             return false;
         }
-        match self.full_reset.step(cleared) {
-            FullStep::Compact => {
-                let entries = std::mem::take(&mut self.entries);
-                if let Some((entries, cpu, live)) =
-                    compact_entries(entries, &self.store_cpu, self.frame, self.capacity())
-                {
-                    self.entries = entries;
-                    self.used = cpu.len() as u32;
-                    self.store_cpu = cpu;
-                    self.live = live;
-                    self.pending = self.store_cpu.clone();
-                    self.pending_at = 0;
-                } else {
-                    self.clear_store();
-                }
-            }
-            FullStep::EmptyRetry => self.clear_store(),
-            FullStep::Grow => {
-                grow_limit(&mut self.limit, self.max_rows, &mut self.gave_up);
-                if self.gave_up {
-                    log::warn!("too many shapes for what the GPU can hold");
-                }
+        let step = self.full_reset.step();
+        if step == FullStep::Grow {
+            grow_limit(&mut self.limit, self.max_rows, &mut self.gave_up);
+            if self.gave_up {
+                log::warn!("too many shapes for what the GPU can hold");
                 self.clear_store();
+                return true;
             }
+        }
+        let entries = std::mem::take(&mut self.entries);
+        let keep_previous = step == FullStep::Compact;
+        if let Some((entries, cpu, live)) = compact_entries(
+            entries,
+            &self.store_cpu,
+            self.frame,
+            self.capacity(),
+            keep_previous,
+        ) {
+            self.entries = entries;
+            self.used = cpu.len() as u32;
+            self.store_cpu = cpu;
+            self.live = live;
+            self.pending = self.store_cpu.clone();
+            self.pending_at = 0;
+        } else {
+            self.clear_store();
         }
         true
     }
@@ -1006,8 +1023,7 @@ impl PathPass {
         let m = Affine::translation(dx as f64, dy as f64)
             .then_apply(&Affine::scaling(k as f64, k as f64))
             .then_apply(&d.transform);
-        let (ox, oy) = (m.e.floor(), m.f.floor());
-        let local = kurbo::Affine::new([m.a, m.b, m.c, m.d, m.e - ox, m.f - oy]);
+        let (ox, oy, local) = split_translation(&m);
         let bounds = d.bounds.scaled(k).translate(dx, dy);
         // What is too big to make all of is made as far as it shows, which depends on where it is.
         let region = (bounds.width as f64 > WHOLE_LIMIT || bounds.height as f64 > WHOLE_LIMIT)
@@ -1728,7 +1744,7 @@ mod tests {
         entries.insert(a, store_entry(3, 3, 10, 3));
         entries.insert(b, store_entry(6, 2, 9, 6));
         let store = [90, 91, 92, 10, 11, 12, 20, 21];
-        let (entries, cpu, live) = compact_entries(entries, &store, 10, 100).expect("fits");
+        let (entries, cpu, live) = compact_entries(entries, &store, 10, 100, true).expect("fits");
         assert_eq!(cpu, [10, 11, 12, 20, 21]);
         assert_eq!(live, 3);
         assert_eq!(entries.len(), 2);
@@ -1740,26 +1756,58 @@ mod tests {
     }
 
     #[test]
-    fn a_full_store_tries_an_empty_store_before_growing() {
+    fn a_full_store_compacts_twice_then_grows_without_clearing() {
         let mut reset = FullReset::default();
-        assert_eq!(reset.step(false), FullStep::Compact);
-        assert_eq!(reset.step(true), FullStep::EmptyRetry);
-        assert_eq!(reset.step(true), FullStep::Grow);
+        assert_eq!(reset.step(), FullStep::Compact);
+        assert_eq!(reset.step(), FullStep::CompactCurrent);
+        assert_eq!(reset.step(), FullStep::Grow);
+        assert_eq!(reset.step(), FullStep::Grow);
         reset.begin_frame();
-        assert_eq!(reset.step(false), FullStep::Compact);
+        assert_eq!(reset.step(), FullStep::Compact);
 
         let mut limit = 8;
         let mut gave_up = false;
-        assert_eq!(reset.step(false), FullStep::Compact);
-        assert_eq!(reset.step(true), FullStep::EmptyRetry);
-        assert_eq!(limit, 8);
-        assert!(!gave_up, "an empty retry must not grow or give up");
-        assert_eq!(reset.step(true), FullStep::Grow);
         grow_limit(&mut limit, 16, &mut gave_up);
         assert_eq!(limit, 16);
         assert!(!gave_up);
         grow_limit(&mut limit, 16, &mut gave_up);
         assert_eq!(limit, 16);
         assert!(gave_up, "only a full store at the maximum gives up");
+    }
+
+    #[test]
+    fn a_frame_that_overflows_twice_keeps_what_it_drew() {
+        let a = store_key(1);
+        let b = store_key(2);
+        let old = store_key(3);
+        let mut entries = HashMap::new();
+        entries.insert(old, store_entry(0, 2, 8, 0));
+        entries.insert(a, store_entry(2, 3, 10, 2));
+        entries.insert(b, store_entry(5, 2, 9, 5));
+        let store = [90, 91, 10, 11, 12, 20, 21];
+        let (entries, cpu, live) = compact_entries(entries, &store, 10, 100, true).expect("fits");
+        assert_eq!(cpu, [10, 11, 12, 20, 21]);
+        assert_eq!(live, 3);
+        assert!(entries.contains_key(&b) && !entries.contains_key(&old));
+        let (entries, cpu, live) = compact_entries(entries, &cpu, 10, 100, false).expect("fits");
+        assert_eq!(cpu, [10, 11, 12]);
+        assert_eq!(live, 3);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[&a].frame, 10);
+        assert_eq!(entries[&a].base, 0);
+        assert_eq!(entries[&a].runs[0].alpha, 0);
+    }
+
+    #[test]
+    fn a_fraction_that_drifts_a_little_is_the_same_key() {
+        let local_at = |e: f64, f: f64| {
+            let (_, _, local) = split_translation(&Affine::translation(e, f));
+            local.as_coeffs().map(|v| (v as f32).to_bits())
+        };
+        assert_eq!(local_at(7.3, 2.6), local_at(7.3 + 1e-5, 2.6 - 1e-5));
+        assert_ne!(local_at(7.3, 2.6), local_at(7.5, 2.6));
+        let (ox, oy, local) = split_translation(&Affine::translation(4.999, 3.0));
+        assert_eq!((ox, oy), (5.0, 3.0));
+        assert_eq!(local.as_coeffs()[4..], [0.0, 0.0]);
     }
 }

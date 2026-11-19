@@ -1508,7 +1508,6 @@ impl Renderer {
         self.preloaded += preloads.len();
         self.compile_shaders(device, &preloads);
         let mut cleared = false;
-        let mut paths_cleared = false;
         loop {
             match self.try_prepare(device, scene, damage, plans) {
                 Some(r) => return r,
@@ -1517,8 +1516,7 @@ impl Renderer {
                         self.compile_shader(device, source);
                         continue;
                     }
-                    if self.paths.take_full(paths_cleared) {
-                        paths_cleared = true;
+                    if self.paths.take_full() {
                         continue;
                     }
                     if std::mem::take(&mut self.missing_effects) {
