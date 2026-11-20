@@ -5,7 +5,7 @@
 
 use crate::parse::{options, scripts};
 use crate::theme::MarkdownTheme;
-use crate::view::{Ctx, Highlight, OnLink, Pictures};
+use crate::view::{CodeChrome, Ctx, Highlight, OnLink, Pictures};
 use anti_webui_core::event::KeyboardEvent;
 use anti_webui_core::prelude::*;
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, LinkType, Parser, Tag, TagEnd};
@@ -114,6 +114,7 @@ pub(crate) struct Decorator {
     /// found in.
     tops: RefCell<Tops>,
     uid: Cell<u64>,
+    chrome: Option<Rc<CodeChrome>>,
 }
 
 impl Decorator {
@@ -127,6 +128,7 @@ impl Decorator {
         ctx: Rc<Ctx>,
         highlight: Option<Rc<Highlight>>,
         editor: EditorRef,
+        chrome: Option<Rc<CodeChrome>>,
     ) -> Self {
         Self {
             theme,
@@ -139,6 +141,7 @@ impl Decorator {
             entries: RefCell::default(),
             tops: RefCell::default(),
             uid: Cell::new(0),
+            chrome,
         }
     }
 
@@ -611,22 +614,47 @@ impl Decorator {
                                 let t = src[starts[last]..line_end(last)].trim_start();
                                 t.starts_with("```") || t.starts_with("~~~")
                             };
-                            for &l in &ls {
-                                lines[l].kind |= kind::CODE;
-                            }
-                            if fenced {
-                                lines[first].kind |= kind::FENCE_TOP;
-                                hide(&mut lines, starts[first]..line_end(first), inside);
-                                if closed {
-                                    lines[last].kind |= kind::FENCE_BOTTOM;
-                                    hide(&mut lines, starts[last]..line_end(last), inside);
-                                }
-                            }
                             let body_lines = if fenced {
                                 first + 1..if closed { last } else { last + 1 }
                             } else {
                                 first..last + 1
                             };
+                            for &l in &ls {
+                                lines[l].kind |= kind::CODE;
+                            }
+                            if fenced {
+                                lines[first].kind |= kind::FENCE_TOP;
+                                let body = if body_lines.is_empty() {
+                                    let at = line_end(first);
+                                    at..at
+                                } else {
+                                    starts[body_lines.start]..line_end(body_lines.end - 1)
+                                };
+                                match &self.chrome {
+                                    Some(chrome) if !inside && !drawn => {
+                                        let (lang, code, chrome) =
+                                            (lang.clone(), src[body].to_owned(), chrome.clone());
+                                        let key = hash_of(&format!("chrome {uid} {first}"));
+                                        let w =
+                                            Widget::new(key, move || chrome(&lang, &code));
+                                        lines[first].replace.push((
+                                            0..line_end(first) - starts[first],
+                                            Some(w),
+                                        ));
+                                    }
+                                    _ => {
+                                        hide(
+                                            &mut lines,
+                                            starts[first]..line_end(first),
+                                            inside,
+                                        );
+                                    }
+                                }
+                                if closed {
+                                    lines[last].kind |= kind::FENCE_BOTTOM;
+                                    hide(&mut lines, starts[last]..line_end(last), inside);
+                                }
+                            }
                             if let Some(f) = &self.highlight
                                 && !body_lines.is_empty()
                             {
@@ -1113,6 +1141,7 @@ pub struct MarkdownEditor {
     #[cfg(feature = "code")]
     code_theme: Option<anti_webui_code::CodeTheme>,
     style: Style,
+    code_chrome: Option<Rc<CodeChrome>>,
 }
 
 pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
@@ -1129,6 +1158,7 @@ pub fn markdown_editor(source: Signal<String>) -> MarkdownEditor {
         #[cfg(feature = "code")]
         code_theme: None,
         style: Style::default(),
+        code_chrome: None,
     }
 }
 
@@ -1192,6 +1222,11 @@ impl MarkdownEditor {
     #[cfg(feature = "code")]
     pub fn code_theme(mut self, theme: anti_webui_code::CodeTheme) -> Self {
         self.code_theme = Some(theme);
+        self
+    }
+
+    pub fn code_chrome(mut self, f: impl Fn(&str, &str) -> View + 'static) -> Self {
+        self.code_chrome = Some(Rc::new(f));
         self
     }
 }
@@ -1341,7 +1376,13 @@ impl IntoView for MarkdownEditor {
             highlight.clone(),
             wiki,
         );
-        let deco = Rc::new(Decorator::new(self.theme.clone(), ctx, highlight, editor));
+        let deco = Rc::new(Decorator::new(
+            self.theme.clone(),
+            ctx,
+            highlight,
+            editor,
+            self.code_chrome,
+        ));
         if let Some(ready) = ready {
             // A grammar came: the code blocks are made again with its colors.
             let deco = deco.clone();

@@ -993,7 +993,16 @@ fn painted_extent(doc: &Document, id: NodeId) -> RectI {
     n.children
         .iter()
         .filter(|c| doc.nodes.get(**c).is_some_and(|c| !c.is_popup()))
-        .fold(own, |bounds, c| bounds.union(&painted_extent(doc, *c)))
+        .fold(own, |bounds, c| {
+            let extent = painted_extent(doc, *c);
+            let extent = match doc.nodes.get(*c) {
+                Some(child) if child.transformed => {
+                    child.layer_matrix(doc.scale).bounds_of(extent)
+                }
+                _ => extent,
+            };
+            bounds.union(&extent)
+        })
 }
 
 /// Positions a popup in its surface, leaving room for what sticks out of its box, and works out
@@ -2583,6 +2592,7 @@ impl Engine<'_> {
 
     /// Lays out a popup at the size it would like, as far as the platform grants it.
     fn layout_popup(&mut self, id: NodeId, window: (Option<i32>, Option<i32>)) {
+        let zoom = self.doc.popup_scale;
         let natural = self.compute(id, (None, None), None, window, false);
         let doc = &*self.doc;
         let Some(data) = doc.nodes[id].popup() else {
@@ -2597,16 +2607,35 @@ impl Engine<'_> {
             Some(a) if data.match_anchor_width => natural.width.max(a.rect.width),
             _ => natural.width,
         };
-        let natural = SizeI::new(width, natural.height);
-        let granted = data.granted.map_or(natural, |g| {
-            SizeI::new(
-                natural.width.min(self.scale.px(g.width as f32)),
-                natural.height.min(self.scale.px(g.height as f32)),
-            )
+        let content = SizeI::new(width, natural.height);
+        let natural = SizeI::new(
+            (content.width as f32 * zoom).round() as i32,
+            (content.height as f32 * zoom).round() as i32,
+        );
+        let granted = data.granted.map_or(content, |g| {
+            let (w, h) = (self.scale.px(g.width as f32), self.scale.px(g.height as f32));
+            let (w, h) = if zoom == 1.0 {
+                (w, h)
+            } else {
+                (
+                    (w as f32 / zoom).round() as i32,
+                    (h as f32 / zoom).round() as i32,
+                )
+            };
+            SizeI::new(content.width.min(w), content.height.min(h))
         });
         self.doc.nodes[id].popup_mut().unwrap().natural = natural;
         let known = (Some(granted.width), Some(granted.height));
-        self.compute(id, known, Some(granted.width), window, true);
+        let size = self.compute(id, known, Some(granted.width), window, true);
+        if zoom != 1.0 {
+            let rect = self.doc.nodes[id].rect;
+            self.doc.nodes[id].rect = RectI::new(
+                rect.x,
+                rect.y,
+                (size.width as f32 * zoom).round() as i32,
+                (size.height as f32 * zoom).round() as i32,
+            );
+        }
     }
 
     fn layout_absolute(&mut self, id: NodeId, size: SizeI) {

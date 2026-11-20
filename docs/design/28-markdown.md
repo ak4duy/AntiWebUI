@@ -88,6 +88,7 @@ markdown_view(source)                     // &str / String / Signal<String>
     .image(|src| resolve(src))            // 相対パスの解決
     .emoji(|name| custom_emoji(name))     // ":party:" → Option<ImageSource>
     .highlight(|lang, code| spans)        // コードの色分け（`code` feature では既定で tree-sitter。[32](32-markdown-split.md)）
+    .code_chrome(|lang, code| view)       // コードブロックの上に出すもの（言語名とコピーのボタンなど）
 ```
 
 - パーサは `pulldown-cmark`。速く、要素ごとにソースのバイト位置を返す。GFM の表、タスクリスト、取り消し線、脚注を有効にする。
@@ -102,6 +103,7 @@ markdown_view(source)                     // &str / String / Signal<String>
 - 終わったタスク（`- [x]`）の文字は `task_done` のスタイルで、既定は空（GitHub と同じくチェックが付くだけ）。Obsidian や Notion のように取り消し線と薄い色にするなら、`task_done` に `strikethrough()` と色を入れる。ビュワーとエディタの両方が使う。
 - ソースが変わったときは、ブロックごとにソースの文字列を比べ、変わったブロックだけを作り直す。
 - コードの色分けは関数を渡すだけにする。`code` feature（既定で有効）では、渡さなければ `anti-webui-code` の `CodeHighlighter`（tree-sitter）で色分けする（[32](32-markdown-split.md)）。
+- `code_chrome` は、フェンスのコードブロックごとに、言語（なければ `""`）とコードを受け取って作ったものをコードの上に出す。横にスクロールするのはコードだけで、出したものは普通のノードなので `on_click` や `dyn_style` がそのまま使える。返さなければ今までどおり何も出さない。Mermaid、数式、字下げだけのコードブロックには出ない。
 
 ### 表
 
@@ -247,6 +249,7 @@ markdown_editor(source)                   // Signal<String> と双方向
     .theme(MarkdownTheme::default())
     .image(|src| resolve(src))
     .on_link(|url| open(url))             // Ctrl + クリック
+    .code_chrome(|lang, code| view)       // フェンスの行に出すもの（ビュワーと同じ）
 ```
 
 - `text_editor` に、Markdown から作った装飾を付ける。
@@ -266,7 +269,7 @@ markdown_editor(source)                   // Signal<String> と双方向
 | `^上付き^`、`~下付き~` | 記号を隠し、上付き、下付きに | 見せる |
 | `- 項目` | `-` を「•」に | `-` |
 | `- [ ] 作業` | チェックボックス（押すとソースの `[ ]` と `[x]` を入れ替える）。終わった作業の文字は `MarkdownTheme::task_done`（既定は空で、GitHub と同じくチェックが付くだけ） | ソース |
-| コードブロック | 行に等幅と背景。囲みの行（` ``` `）は細く、記号を隠す | 囲みの行を見せる |
+| コードブロック | 行に等幅と背景。囲みの行（` ``` `）は細く、記号を隠す。`code_chrome` を渡したときは、隠した囲みの行にその言語名とボタンなどを出す | 囲みの行を見せる（`code_chrome` は出さない） |
 | Mermaid | 図（ブロック） | ソース（コードブロック） |
 | 表 | 表（ブロック。ビュワーと同じもの） | ソース |
 | `---` | 区切り線（ブロック） | ソース |

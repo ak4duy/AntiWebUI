@@ -2500,6 +2500,7 @@ fn hit(doc: &Document, id: NodeId, p: PointF) -> Option<NodeId> {
         }
     }
     if matches!(node.kind, NodeKind::Fragment | NodeKind::SvgText(_))
+        || node.zoom_wrapper
         || !node.computed.pointer_events
     {
         return None;
@@ -2780,11 +2781,17 @@ fn popup_params(doc: &Document, id: NodeId) -> Option<PopupParams> {
         scale.logical_ceil(data.natural.width).max(1),
         scale.logical_ceil(data.natural.height).max(1),
     );
+    let zoom = doc.popup_scale;
+    let gap = if zoom == 1.0 {
+        data.gap
+    } else {
+        (data.gap as f32 * zoom).round() as i32
+    };
     let position = (data.kind == PopupKind::Bubble).then(|| {
         let at = place_in_window(
             anchor,
             data.placement,
-            scale.px(data.gap as f32),
+            scale.px(gap as f32),
             node.abs.size(),
             window,
         );
@@ -2799,7 +2806,7 @@ fn popup_params(doc: &Document, id: NodeId) -> Option<PopupParams> {
         kind: data.kind,
         placement: data.placement,
         anchor,
-        gap: data.gap,
+        gap,
         wanted,
         buffer: surface.buffer,
         logical: surface.logical,

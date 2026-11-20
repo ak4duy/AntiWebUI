@@ -4,7 +4,7 @@
 
 use crate::editor::list_keys;
 use crate::theme::MarkdownTheme;
-use crate::view::{Anchors, Emoji, Emojis, OnLink, Pictures, markdown_view};
+use crate::view::{Anchors, CodeChrome, Emoji, Emojis, OnLink, Pictures, markdown_view};
 use anti_webui_code::{CodeTheme, Language, code_editor};
 use anti_webui_core::drag::GrabPhase;
 use anti_webui_core::prelude::*;
@@ -30,6 +30,7 @@ pub struct MarkdownSplitEditor {
     line_numbers: bool,
     split: f32,
     style: Style,
+    code_chrome: Option<Rc<CodeChrome>>,
 }
 
 /// A split editor of the Markdown in `source`, which it changes as it is edited.
@@ -49,6 +50,7 @@ pub fn markdown_split_editor(source: Signal<String>) -> MarkdownSplitEditor {
         line_numbers: true,
         split: 0.5,
         style: Style::default(),
+        code_chrome: None,
     }
 }
 
@@ -127,6 +129,11 @@ impl MarkdownSplitEditor {
     /// the line between the sides changes it.
     pub fn split(mut self, part: f32) -> Self {
         self.split = part.clamp(NARROWEST, 1.0 - NARROWEST);
+        self
+    }
+
+    pub fn code_chrome(mut self, f: impl Fn(&str, &str) -> View + 'static) -> Self {
+        self.code_chrome = Some(Rc::new(f));
         self
     }
 }
@@ -429,6 +436,9 @@ impl IntoView for MarkdownSplitEditor {
             .code_theme(self.code_theme.clone())
             .wiki_links(wiki)
             .anchors(anchors);
+        if let Some(f) = self.code_chrome {
+            view = view.code_chrome(move |lang, code| f(lang, code));
+        }
         if let Some(f) = self.on_link {
             view = view.on_link(move |u| f(u));
         }

@@ -14,6 +14,7 @@ markdown_split_editor(source)       // 編集すると source が変わる
     .editor_ref(editor)              // 左側を外から動かす
     .line_numbers(true)
     .split(0.5)                      // 左側の幅の割合（間の線をドラッグで変えられる）
+    .code_chrome(|lang, code| view)  // 右側のコードブロックの上に出すもの（[28](28-markdown.md)）
 ```
 
 例は `cargo run --release -p anti-webui --example markdown_editor --features markdown -- notes.md --split`。

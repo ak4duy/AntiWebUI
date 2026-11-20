@@ -76,6 +76,7 @@ pub(crate) enum Block {
     Code {
         lang: String,
         text: String,
+        fenced: bool,
     },
     Quote(Option<Alert>, Vec<Block>),
     List {
@@ -142,8 +143,8 @@ enum Frame {
         pothole: bool,
         alt: String,
     },
-    /// The language, the text, and where it starts.
-    Code(String, String, usize),
+    /// The language, the text, where it starts, and whether it is fenced.
+    Code(String, String, usize, bool),
     Html(String),
 }
 
@@ -191,7 +192,7 @@ impl Builder {
             alt.push_str(text);
             return;
         }
-        if let Some(Frame::Code(_, code, _) | Frame::Html(code)) = self.stack.last_mut() {
+        if let Some(Frame::Code(_, code, _, _) | Frame::Html(code)) = self.stack.last_mut() {
             code.push_str(text);
             return;
         }
@@ -257,13 +258,15 @@ impl Builder {
                 Vec::new(),
             )),
             Tag::CodeBlock(kind) => {
+                let fenced = matches!(&kind, CodeBlockKind::Fenced(_));
                 let lang = match kind {
                     CodeBlockKind::Fenced(info) => {
                         info.split_whitespace().next().unwrap_or("").to_owned()
                     }
                     CodeBlockKind::Indented => String::new(),
                 };
-                self.stack.push(Frame::Code(lang, String::new(), at));
+                self.stack
+                    .push(Frame::Code(lang, String::new(), at, fenced));
             }
             Tag::HtmlBlock => self.stack.push(Frame::Html(String::new())),
             Tag::List(start) => self.stack.push(Frame::List(start, Vec::new())),
@@ -373,7 +376,7 @@ impl Builder {
                 }
             }
             TagEnd::CodeBlock => {
-                if let Some(Frame::Code(lang, mut text, at)) = self.stack.pop() {
+                if let Some(Frame::Code(lang, mut text, at, fenced)) = self.stack.pop() {
                     if text.ends_with('\n') {
                         text.pop();
                     }
@@ -387,7 +390,14 @@ impl Builder {
                         };
                         self.block(Block::Paragraph(vec![math]), end);
                     } else {
-                        self.block(Block::Code { lang, text }, end);
+                        self.block(
+                            Block::Code {
+                                lang,
+                                text,
+                                fenced,
+                            },
+                            end,
+                        );
                     }
                 }
             }
@@ -760,7 +770,8 @@ mod tests {
             doc[1].block,
             Block::Code {
                 lang: "mermaid".into(),
-                text: "graph TD".into()
+                text: "graph TD".into(),
+                fenced: true
             }
         );
     }

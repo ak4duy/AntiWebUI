@@ -58,6 +58,7 @@ pub(crate) type Highlight = dyn Fn(&str, &str) -> Vec<(Range<usize>, Rc<Style>)>
 pub(crate) type OnLink = Option<Rc<dyn Fn(&str)>>;
 pub(crate) type Pictures = Option<Rc<dyn Fn(&str) -> ImageSource>>;
 pub(crate) type Emojis = Option<Rc<dyn Fn(&str) -> Option<Emoji>>>;
+pub(crate) type CodeChrome = dyn Fn(&str, &str) -> View;
 
 /// A Markdown document, shown with ordinary nodes. When the source is a closure, the blocks whose
 /// source didn't change stay as they are.
@@ -73,6 +74,7 @@ pub struct MarkdownView {
     code_theme: Option<anti_webui_code::CodeTheme>,
     anchors: Option<Rc<Anchors>>,
     style: Style,
+    code_chrome: Option<Rc<CodeChrome>>,
 }
 
 pub fn markdown_view(source: impl IntoMarkdown) -> MarkdownView {
@@ -88,6 +90,7 @@ pub fn markdown_view(source: impl IntoMarkdown) -> MarkdownView {
         code_theme: None,
         anchors: None,
         style: Style::default(),
+        code_chrome: None,
     }
 }
 
@@ -146,6 +149,11 @@ impl MarkdownView {
     /// Keeps where the blocks are, for a split editor.
     pub(crate) fn anchors(mut self, anchors: Rc<Anchors>) -> Self {
         self.anchors = Some(anchors);
+        self
+    }
+
+    pub fn code_chrome(mut self, f: impl Fn(&str, &str) -> View + 'static) -> Self {
+        self.code_chrome = Some(Rc::new(f));
         self
     }
 }
@@ -221,6 +229,7 @@ pub(crate) struct Ctx {
     /// Where in the document the source being made into blocks starts, when it is only part of
     /// it.
     base: std::cell::Cell<usize>,
+    chrome: RefCell<Option<Rc<CodeChrome>>>,
 }
 
 pub(crate) type EntryKey = (u64, u32, u32);
@@ -284,7 +293,12 @@ impl Ctx {
             split: RefCell::default(),
             numbers: RefCell::default(),
             base: Default::default(),
+            chrome: RefCell::default(),
         })
+    }
+
+    pub(crate) fn set_chrome(&self, chrome: Option<Rc<CodeChrome>>) {
+        *self.chrome.borrow_mut() = chrome;
     }
 
     /// The first block of `source`, as the viewer shows it.
@@ -706,7 +720,11 @@ impl Ctx {
                     .child(self.inlines(p, self.size_of(style)))
                     .into_view()
             }
-            Block::Code { lang, text: code } => {
+            Block::Code {
+                lang,
+                text: code,
+                fenced,
+            } => {
                 #[cfg(feature = "mermaid")]
                 if lang == "mermaid" {
                     return div()
@@ -716,7 +734,7 @@ impl Ctx {
                         .child(crate::mermaid::diagram(code))
                         .into_view();
                 }
-                self.code(lang, code, gap)
+                self.code(lang, code, gap, *fenced)
             }
             Block::Quote(alert, blocks) => self.quote(*alert, blocks, gap, depth),
             Block::List { start, items } => self.list(*start, items, gap, depth),
@@ -737,7 +755,7 @@ impl Ctx {
         }
     }
 
-    fn code(self: &Rc<Self>, lang: &str, code: &str, gap: f32) -> View {
+    fn code(self: &Rc<Self>, lang: &str, code: &str, gap: f32, fenced: bool) -> View {
         let t = &self.theme;
         let scroll = Style {
             overflow_x: Some(Overflow::Scroll),
@@ -752,13 +770,15 @@ impl Ctx {
             }
             None => self.code_text(code, Vec::new()),
         };
-        div()
-            .style(&t.code_block)
-            .style(&scroll)
-            .mt(gap)
-            .mb(0.0)
-            .child(body)
-            .into_view()
+        let boxed = div().style(&t.code_block).mt(gap).mb(0.0);
+        let chrome = self.chrome.borrow().clone().filter(|_| fenced);
+        if let Some(chrome) = chrome {
+            return boxed
+                .child(div().mb(8.0).child(chrome(lang, code)))
+                .child(div().style(&scroll).child(body))
+                .into_view();
+        }
+        boxed.style(&scroll).child(body).into_view()
     }
 
     /// The text of a code block, with its colors.
@@ -1157,6 +1177,7 @@ impl IntoView for MarkdownView {
             highlight,
             self.wiki,
         );
+        ctx.set_chrome(self.code_chrome);
         *ctx.split.borrow_mut() = self.anchors.clone();
         let source = self.source;
         let items = {

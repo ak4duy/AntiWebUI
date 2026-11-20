@@ -361,6 +361,7 @@ pub(crate) fn also_bool(
 
 thread_local! {
     static WINDOW_SCALE: Cell<Option<Signal<Scale>>> = const { Cell::new(None) };
+    static POPUP_SCALE: Cell<Option<Signal<f32>>> = const { Cell::new(None) };
     static FULLSCREEN: Cell<Option<FullscreenSignals>> = const { Cell::new(None) };
 }
 
@@ -368,12 +369,14 @@ thread_local! {
 #[derive(Default)]
 pub(crate) struct Locals {
     scale: Option<Signal<Scale>>,
+    popup_scale: Option<Signal<f32>>,
     fullscreen: Option<FullscreenSignals>,
 }
 
 /// Trades what the window being worked on has for `other`.
 pub(crate) fn swap_locals(other: &mut Locals) {
     WINDOW_SCALE.with(|s| other.scale = s.replace(other.scale));
+    POPUP_SCALE.with(|s| other.popup_scale = s.replace(other.popup_scale));
     FULLSCREEN.with(|s| other.fullscreen = s.replace(other.fullscreen));
 }
 
@@ -485,6 +488,38 @@ pub fn window_scale() -> Scale {
 
 pub(crate) fn tell_window_scale(scale: Scale) {
     window_scale_signal().set_if_changed(scale);
+}
+
+fn popup_scale_signal() -> Signal<f32> {
+    POPUP_SCALE.with(|s| {
+        s.get().unwrap_or_else(|| {
+            let (signal, _) = create_root(|| signal(with_doc(|d| d.popup_scale)));
+            s.set(Some(signal));
+            signal
+        })
+    })
+}
+
+/// How much bigger what shows in popups and portals is than the window: 1 is as it says, 2 is
+/// twice as big. Reading it tracks it.
+pub fn popup_scale() -> f32 {
+    popup_scale_signal().get()
+}
+
+/// Makes what shows in popups and portals as much bigger as `scale` says: menus, dropdowns,
+/// tooltips, toasts and dialogs included. Something anchored to something else stays where it is
+/// anchored and grows from there, and something in a [`portal`] keeps the window's size, so what
+/// is in the middle of it stays in the middle.
+pub fn set_popup_scale(scale: f32) {
+    let scale = scale.clamp(0.1, 8.0);
+    popup_scale_signal().set_if_changed(scale);
+    with_doc(|d| {
+        if d.popup_scale != scale {
+            d.popup_scale = scale;
+            d.invalidate_all_layout();
+            d.mark_paint();
+        }
+    });
 }
 
 type SheetFn = Box<dyn Fn() -> Rc<Sheet>>;
@@ -2127,6 +2162,8 @@ impl IntoView for Popup {
                 });
             });
         }
+        let scaled = self.data.preview_of.is_none();
+        let portal = self.data.portal;
         let mut node = Node::new(NodeKind::Popup(Box::new(self.data)));
         node.style.base = Style {
             display: Some(Layout::Flex),
@@ -2136,8 +2173,33 @@ impl IntoView for Popup {
             ..Default::default()
         };
         let id = create_node(node);
-        let children: Vec<NodeId> = self.children.into_iter().map(|v| v.0).collect();
-        with_doc(|d| d.set_children(id, children));
+        if scaled {
+            let wrapper = div()
+                .flex()
+                .flex_col()
+                .items_stretch()
+                .dyn_style(move |s| {
+                    let k = popup_scale();
+                    let s = s.scale(k).transform_origin(0.0, 0.0);
+                    if portal {
+                        s.w(anti_webui_style::pct(100.0 / k))
+                            .h(anti_webui_style::pct(100.0 / k))
+                    } else {
+                        s
+                    }
+                })
+                .children(self.children)
+                .into_view();
+            with_doc(|d| {
+                if let Some(n) = d.get_mut(wrapper.0) {
+                    n.zoom_wrapper = true;
+                }
+            });
+            with_doc(|d| d.set_children(id, vec![wrapper.0]));
+        } else {
+            let children: Vec<NodeId> = self.children.into_iter().map(|v| v.0).collect();
+            with_doc(|d| d.set_children(id, children));
+        }
         View(id)
     }
 }

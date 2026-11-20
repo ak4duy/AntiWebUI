@@ -232,6 +232,8 @@ pub struct Node {
     pub doc_order: u32,
     /// False inside `display: none` subtrees.
     pub visible: bool,
+    /// Takes no pointer of its own: what a scaled popup or portal is wrapped in.
+    pub(crate) zoom_wrapper: bool,
     /// The outermost scroller that overflows: its descendants don't move when it scrolls.
     pub scroll_root: bool,
     /// The scroll root whose content this node is part of, the popup whose surface it is on, or
@@ -314,6 +316,7 @@ impl Node {
             scroll: PointI::default(),
             doc_order: 0,
             visible: false,
+            zoom_wrapper: false,
             scroll_root: false,
             space: None,
             transformed: false,
@@ -560,6 +563,9 @@ pub struct Document {
     pub state: WindowState,
     pub dirty: Dirty,
     pub scale: Scale,
+    /// How much bigger what shows in popups and portals is laid out than the window: 1 is as it
+    /// says, 2 twice as big. See `set_popup_scale`.
+    pub popup_scale: f32,
     pub viewport: SizeI,
     /// Which axes of the window follow the max-content size of what is in it, as a layer surface's
     /// may, and that size in pixels once laid out.
@@ -659,6 +665,7 @@ impl Default for Document {
             state: WindowState::default(),
             dirty: Dirty::default(),
             scale: Scale::ONE,
+            popup_scale: 1.0,
             viewport: SizeI::default(),
             fit: (false, false),
             natural: None,

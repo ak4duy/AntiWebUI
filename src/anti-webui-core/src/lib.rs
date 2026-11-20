@@ -86,8 +86,9 @@ pub mod prelude {
         BitmapView, Div, EditorRef, ForEach, Img, Interaction, IntoImageSource, IntoTextSource,
         IntoVideoSource, IntoView, NodeRef, Popup, Show, Text, TextEditor, TextInput, Video, View,
         bitmap_view, clear_text_selection, div, dyn_view, editor_ref, exit_fullscreen, for_each,
-        fragment, img, node_ref, popup, portal, set_clipboard, set_window_fullscreen, shader, show,
-        text, text_area, text_editor, text_input, video, window_fullscreen, window_scale,
+        fragment, img, node_ref, popup, popup_scale, portal, set_clipboard, set_popup_scale,
+        set_window_fullscreen, shader, show, text, text_area, text_editor, text_input, video,
+        window_fullscreen, window_scale,
     };
     pub use crate::window::{
         CloseRequest, DecorationMode, Decorations, GpuBackend, GpuInfo, GpuKind, GpuPresent,
